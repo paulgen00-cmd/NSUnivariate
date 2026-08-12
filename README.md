@@ -34,6 +34,22 @@ Everything outside these four points is byte-identical to the issue #1 code.
 The ELR notebook's header (imports, widgets, the `spark.sql` read) was not in the issue
 thread; it is reconstructed from the inforce notebook, which reads the same table.
 
+## Verification
+
+```bash
+python tests/run_notebooks.py
+```
+
+Runs all three notebooks against a pandas-backed shim of the Spark API with synthetic
+fixtures — 22 checks. It is not Spark and does not replace a cluster run; see
+[AUDIT.md](AUDIT.md) §4 for exactly what it does and does not prove.
+
+## Audit
+
+[AUDIT.md](AUDIT.md) reviews the original extracts against the pipeline source and schema
+dumps. One blocker (the TRX source table does not exist), six correctness fixes, two
+deliberate non-changes, and seven things that need checking on the cluster.
+
 ## Before the first run
 
 - **`veh_fsa_tx` must be on the TRX table.** The inforce pipeline does `select *`, so it is
