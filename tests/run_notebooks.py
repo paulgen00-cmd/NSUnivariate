@@ -30,31 +30,12 @@ FAILURES = []
 # ---------------------------------------------------------------------------
 # Notebook loading: strip Databricks magics, keep the python
 # ---------------------------------------------------------------------------
-CODE_START = re.compile(
-    r"^(from |import |for |def |if |assert |print\(|[A-Za-z_][A-Za-z_0-9]*\s*[=(]|"
-    r"df_|recon|provs|adido_out|required_cols|null_cov|bad_expo|measure_out)"
-)
-
-
 def notebook_source(path: Path) -> str:
-    out, in_md = [], False
-    for line in path.read_text(encoding="utf-8").split("\n"):
-        s = line.strip()
-        if s.startswith("%md"):
-            in_md = True
-            out.append("")
-            continue
-        if s.startswith("%"):
-            out.append("")
-            continue
-        if in_md:
-            if CODE_START.match(s):
-                in_md = False
-            else:
-                out.append("")
-                continue
-        out.append(line)
-    return "\n".join(out)
+    """The notebooks are plain python plus `%run` magics; blank those out."""
+    return "\n".join(
+        "" if line.strip().startswith("%") else line
+        for line in path.read_text(encoding="utf-8").split("\n")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +154,7 @@ def make_env(widgets):
 
 
 def run_nb(name, env):
-    src = notebook_source(NB / "00_fsa_common.py") + "\n" + notebook_source(NB / name)
-    exec(compile(src, name, "exec"), env)
+    exec(compile(notebook_source(NB / name), name, "exec"), env)
     return env
 
 
@@ -230,8 +210,8 @@ def test_trx_missing_fsa():
         run_nb("01_trx_classification_fsa.py", env)
         check("raises when veh_fsa_tx is absent", False, "no exception")
     except ValueError as e:
-        check("raises when veh_fsa_tx is absent, naming the helper CSV",
-              "ap_trx_data_extract_helper.csv" in str(e) or "veh_fsa_tx" in str(e), str(e)[:120])
+        check("raises when veh_fsa_tx is absent, naming the column",
+              "veh_fsa_tx" in str(e), str(e)[:160])
 
 
 def test_inforce():
@@ -266,7 +246,7 @@ def test_inforce_double_count_guard():
         run_nb("02_inforce_classification_fsa.py", env)
         check("assert fires on overlapping AP/COL", False, "no exception")
     except AssertionError as e:
-        check("assert fires on overlapping AP/COL", "double counted" in str(e), str(e)[:120])
+        check("assert fires on overlapping AP/COL", "double count" in str(e), str(e)[:120])
 
 
 def test_elr():
@@ -317,7 +297,7 @@ def test_no_table():
     except ValueError as e:
         msg = str(e)
         check("raises listing what was tried",
-              "does not exist" in msg and "missing" in msg, msg[:200])
+              "no usable TRX table" in msg and "missing" in msg, msg[:200])
 
 
 if __name__ == "__main__":

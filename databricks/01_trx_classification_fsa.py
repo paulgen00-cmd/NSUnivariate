@@ -1,35 +1,29 @@
-%md
-# TRX classification extract — by raw FSA
+# ============================================================================
+# CELL 1 - paste alone, nothing else in the cell
+# ============================================================================
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Classification
 
-Same output as the `ter_onlvl_ibc_no` version (ADIDO 3868, `TRX_<var>`): earned on-level
-premium, earned exposure, claim counts and capped claim amounts summed by
-jurisdiction x company x accident year x variable. The only analytical change is the
-grouping variable: `ter_onlvl_ibc_no` -> raw FSA.
+# ============================================================================
+# CELL 2 - paste alone, nothing else in the cell
+# ============================================================================
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/Utils
 
-**Read the source-table note in the README before running.** The table name in the original
-code does not match any table the TRX pipeline writes; this notebook resolves it instead of
-guessing.
+# ============================================================================
+# CELL 3 - everything below is one cell, paste it all at once
+# ============================================================================
 from pyspark.sql import functions as F
+from pyspark.sql.utils import AnalysisException
 from functools import reduce
-as_of_date_suffix = dbutils.widgets.get("as_of_date_suffix")
+
+dbutils.widgets.text("province", "NS")
+dbutils.widgets.text("as_of_date_suffix", "202603")
+
 province = dbutils.widgets.get("province")
-%run ./00_fsa_common
-# ---------------------------------------------------------------------
-# Grouping variable
-# ---------------------------------------------------------------------
-# WAS: VARS = ["ter_onlvl_ibc_no"]
-VARS = [FSA_VAR]
+as_of_date_suffix = dbutils.widgets.get("as_of_date_suffix")
 
-#################### Interaction Variables ###############
-# dri_type_cd_x_number_au_mh_x_veh_dri_onp_nb
-# dri_type_cd_x_rat_km_work_nb
-# dri_type_cd_x_rat_km_business_nb
-# dri_type_cd_x_rat_km_annual_nb
-# "ter_onlvl_ibc_no"
+FSA_COL = "veh_fsa_tx"   # or "pol_fsa_tx"
+VARS = ["fsa_tx"]
 
-# ---------------------------------------------------------------------
-# Columns used in filters + aggregations (kept explicit for reliability)
-# ---------------------------------------------------------------------
 premium_cols = [
     "Prm_Ern_BI_OnLvl_End_Am",
     "Prm_Ern_PD_OnLvl_End_Am",
@@ -70,49 +64,37 @@ clm_am_cols = [
 
 base_group_cols = ["pol_jurisdiction_cd", "pol_uwcompany_cd", "pol_acc_yr_dt"]
 measure_cols = premium_cols + expo_cols + clm_nb_cols + clm_am_cols
-%md
-## Read data
+required_cols = base_group_cols + measure_cols + ["dri_type_cd", FSA_COL]
 
-The original code read `trx_{prov}_ppa_prep_onlvl_{suffix}`. The pipeline writes
-`trx_{prov}_ppa_prep_{suffix}` (prepped), `trx_{prov}_ppa_prep_{suffix}_onlvl` (scored) and
-`trx_ap_ppa_prep_onlvl_{suffix}` (scored + endorsement split + earned premium). Only the
-last one carries `Prm_Ern_*_OnLvl_End_Am` and `Xpo_Ern_*_Nb`, because the earning step in
-`06_ap_ppa_trx_pipeline.py` runs after the four provinces are unioned back together.
+# Prm_Ern_* / Xpo_Ern_* are built after the four provinces are unioned back together,
+# so they only exist on the AP-wide table. Try each name, take the first that has them.
+df_trx = None
+tried = []
+for t in [f"t_ap_ppa_pricing.trx_{province.lower()}_ppa_prep_onlvl_{as_of_date_suffix}",
+          f"t_ap_ppa_pricing.trx_{province.lower()}_ppa_prep_{as_of_date_suffix}_onlvl",
+          f"t_ap_ppa_pricing.trx_ap_ppa_prep_onlvl_{as_of_date_suffix}"]:
+    try:
+        d = spark.table(t)
+    except AnalysisException:
+        tried.append(f"{t} -> missing table")
+        continue
+    gaps = [c for c in required_cols if c not in d.columns]
+    if gaps:
+        tried.append(f"{t} -> missing {gaps[:5]}")
+        continue
+    df_trx, trx_table = d, t
+    break
+if df_trx is None:
+    raise ValueError("no usable TRX table:\n  " + "\n  ".join(tried))
+print(f"using {trx_table}")
 
-`resolve_table` tries each name and takes the first that exists AND has every column this
-notebook needs, so it is correct whichever table your workspace actually holds.
-required_cols = base_group_cols + measure_cols + ["dri_type_cd", FSA_SOURCE_COL]
-
-df_trx, trx_table = resolve_table(
-    candidates = [
-        f"t_ap_ppa_pricing.trx_{province.lower()}_ppa_prep_onlvl_{as_of_date_suffix}",
-        f"t_ap_ppa_pricing.trx_{province.lower()}_ppa_prep_{as_of_date_suffix}_onlvl",
-        f"t_ap_ppa_pricing.trx_ap_ppa_prep_onlvl_{as_of_date_suffix}",
-    ],
-    required_cols = required_cols,
-    context = "TRX",
-)
-
-# The AP-wide table holds all four provinces. The original read a province-specific name,
-# so filter to keep the row set identical either way. pol_jurisdiction_cd stays in the
-# group-by as a provenance check: more than one value in the output means this filter did
-# not do what you think.
 df_trx = df_trx.filter(F.col("pol_jurisdiction_cd") == F.lit(province.upper()))
-%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Classification
-# ---------------------------------------------------------------------
-# Build filter condition: dri_type_cd != "OccasionalPrincipal"
-# and all premium cols not null
-# ---------------------------------------------------------------------
+
 not_null_all_premiums = reduce(
     lambda acc, c: acc & F.col(c).isNotNull(),
     premium_cols,
     F.lit(True)
 )
-
-# ---------------------------------------------------------------------
-# Prep data (filter, mutate, join, coalesce)
-# ---------------------------------------------------------------------
-
 
 df_trx_prep = (df_trx
     .filter(
@@ -129,47 +111,32 @@ df_trx_prep = (df_trx
 
 df_trx_prep = ClassificationPrep(df_trx_prep)
 
-# ClassificationPrep does not touch the FSA columns, so the derivation goes after it and
-# the banding of every other variable is unchanged.
-df_trx_prep = add_fsa(df_trx_prep)
+# Raw FSA: upper/trim, nulls to UNKNOWN so the group-by does not drop those rows.
+_fsa = F.upper(F.trim(F.col(FSA_COL)))
+df_trx_prep = df_trx_prep.withColumn(
+    "fsa_tx",
+    F.when(_fsa.isNull() | (_fsa == F.lit("")), F.lit("UNKNOWN")).otherwise(_fsa)
+)
 
-require_columns(df_trx_prep, base_group_cols + measure_cols + VARS, "TRX post-prep")
-fsa_coverage_check(df_trx_prep, "TRX")
-%run /Workspace/Shared/t_ap_ppa_pricing/Functions/Utils
-# ---------------------------------------------------------------------
-# Loop over VARS (your R code has only one var, but keeping loop)
-# ---------------------------------------------------------------------
+_chk = df_trx_prep.agg(
+    F.count(F.lit(1)).alias("rows"),
+    F.countDistinct(F.col("fsa_tx")).alias("cells"),
+    F.sum(F.when(F.col("fsa_tx") == "UNKNOWN", 1).otherwise(0)).alias("unknown")
+).collect()[0]
+print(f"rows={_chk['rows']:,}  FSA cells={_chk['cells']:,}  UNKNOWN={_chk['unknown']:,}")
+
 for v in VARS:
     group_cols = base_group_cols + [v]
 
-    # select only required columns (like dplyr::select)
     df_sel = df_trx_prep.select(*(group_cols + measure_cols))
 
-    # sum everything except group cols (like summarise(across(everything(), sum)))
-    # F.sum ignores nulls, matching R's na.rm = TRUE.
     agg_exprs = [F.sum(F.col(c)).alias(c) for c in measure_cols]
 
     df_out = (df_sel
         .groupBy(*group_cols)
         .agg(*agg_exprs)
     )
-    df_out.cache()
 
     adido_out(table = df_out, ticket = 3868, filename = 'Trx_on_ppa_Ay_onlvl_wRels', freeForm = f"TRX_{v}", fileformat='parquet', folder_out = f't_ap_ppa_pricing/data/{province.lower()}/classification/')
 
-thin_cell_report(df_out, "Xpo_Ern_BI_Nb", "TRX", floor = 100)
 df_out.display()
-%md
-## Reconciliation
-
-Same rows, different key — so every measure must tie to the `ter_onlvl_ibc_no` run at the
-original grain. A break means rows were lost, most likely to a null FSA. Run this before
-using the exhibit.
-recon = (df_out
-    .groupBy(*base_group_cols)
-    .agg(*[F.sum(F.col(c)).alias(c) for c in measure_cols]))
-recon.display()
-# Guard: one province in, one province out.
-provs = [r["pol_jurisdiction_cd"] for r in df_out.select("pol_jurisdiction_cd").distinct().collect()]
-assert provs == [province.upper()], f"expected only {province.upper()}, got {provs}"
-print(f"OK - source table {trx_table}, single jurisdiction {provs[0]}")

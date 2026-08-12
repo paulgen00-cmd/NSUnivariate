@@ -290,6 +290,10 @@ class FakeWidgets:
     def dropdown(self, *a, **k):
         pass
 
+    def text(self, name, default="", *a, **k):
+        # matches Databricks: creating a widget that already exists keeps its value
+        self.values.setdefault(name, default)
+
 
 class FakeDbutils:
     def __init__(self, values):
