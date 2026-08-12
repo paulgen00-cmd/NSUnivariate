@@ -37,6 +37,8 @@ class Col:
     def __and__(self, o): return self._bin(o, lambda a, b: a & b, " and ")
     def __or__(self, o):  return self._bin(o, lambda a, b: a | b, " or ")
     def __add__(self, o): return self._bin(o, lambda a, b: a + b, "+")
+    def __sub__(self, o): return self._bin(o, lambda a, b: a - b, "-")
+    def __mul__(self, o): return self._bin(o, lambda a, b: a * b, "*")
     def __truediv__(self, o): return self._bin(o, lambda a, b: a / b, "/")
 
     def isNull(self):    return Col(lambda df: self.fn(df).isna(), f"{self.name} is null")
@@ -105,6 +107,8 @@ class Agg:
             return int(s.notna().sum()) if self.col is not None else len(df)
         if self.kind == "countDistinct":
             return int(s.nunique(dropna=True))
+        if self.kind == "avg":
+            return s.mean(skipna=True)
         raise NotImplementedError(self.kind)
 
 
@@ -141,6 +145,7 @@ def coalesce(*cols):
 
 
 def sum(c):            return Agg("sum", _c(c), f"sum({_n(c)})")
+def avg(c):            return Agg("avg", _c(c), f"avg({_n(c)})")
 def count(c):          return Agg("count", None if _n(c) == "1" else _c(c), f"count({_n(c)})")
 def countDistinct(c):  return Agg("countDistinct", _c(c), f"count(distinct {_n(c)})")
 
@@ -153,8 +158,9 @@ class F:
     col, lit, when, upper, trim, coalesce = (
         staticmethod(col), staticmethod(lit), staticmethod(when),
         staticmethod(upper), staticmethod(trim), staticmethod(coalesce))
-    sum, count, countDistinct = (
-        staticmethod(sum), staticmethod(count), staticmethod(countDistinct))
+    sum, count, countDistinct, avg = (
+        staticmethod(sum), staticmethod(count), staticmethod(countDistinct),
+        staticmethod(avg))
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +210,29 @@ class DataFrame:
                 names.append(c.name)
         return DataFrame(pdf[names])
 
+    def drop(self, *names):
+        return DataFrame(self._pdf.drop(columns=[n for n in names if n in self._pdf.columns]))
+
     def distinct(self):
         return DataFrame(self._pdf.drop_duplicates())
+
+    def unionByName(self, other, allowMissingColumns=False):
+        return DataFrame(pd.concat([self._pdf, other._pdf], ignore_index=True, sort=False))
+
+    def join(self, other, on=None, how="inner"):
+        on = [on] if isinstance(on, str) else list(on)
+        return DataFrame(self._pdf.merge(other._pdf, on=on,
+                                         how={"left": "left"}.get(how, how)))
+
+    @property
+    def write(self):
+        return _Writer(self)
 
     def groupBy(self, *keys):
         return _Grouped(self._pdf, [k if isinstance(k, str) else k.name for k in keys])
 
     def agg(self, *aggs):
-        row = {a.name: a.apply(self._pdf) for a in aggs}
+        row = {a.name: _agg_value(a, self._pdf) for a in aggs}
         return DataFrame(pd.DataFrame([row]))
 
     def count(self):
@@ -224,6 +245,32 @@ class DataFrame:
     def display(self):   pass
     def show(self, *a):  pass
     def toPandas(self):  return self._pdf.copy()
+
+
+def _agg_value(a, pdf):
+    """Spark allows a literal Column inside agg() alongside real aggregates."""
+    if isinstance(a, Agg):
+        return a.apply(pdf)
+    s = a.fn(pdf)
+    return s.iloc[0] if len(s) else None
+
+
+class _Writer:
+    """df.write.format(...).mode(...).saveAsTable(name) — records into the catalog."""
+
+    def __init__(self, df):
+        self.df = df
+        self.spark = None
+
+    def format(self, _f):  return self
+    def mode(self, _m):    return self
+    def option(self, *a, **k): return self
+
+    def saveAsTable(self, name):
+        SPARK_SINGLETON[0].register(name, self.df._pdf)
+
+
+SPARK_SINGLETON = [None]
 
 
 class _Grouped:
@@ -241,7 +288,7 @@ class _Grouped:
             vals = vals if isinstance(vals, tuple) else (vals,)
             row = dict(zip(self.keys, vals))
             for a in aggs:
-                row[a.name] = a.apply(grp)
+                row[a.name] = _agg_value(a, grp)
             rows.append(row)
         return DataFrame(pd.DataFrame(rows))
 
@@ -259,6 +306,7 @@ class FakeSpark:
 
     def __init__(self):
         self.tables = {}
+        SPARK_SINGLETON[0] = self
 
     def register(self, name, pdf):
         self.tables[name] = pdf
@@ -269,6 +317,10 @@ class FakeSpark:
         return DataFrame(self.tables[name])
 
     def sql(self, q):
+        m = re.search(r"drop table if exists\s+(\S+)", q, re.I)
+        if m:
+            self.tables.pop(m.group(1), None)
+            return DataFrame(pd.DataFrame())
         m = re.search(r"describe table\s+(\S+)", q, re.I)
         if m:
             if m.group(1) not in self.tables:
@@ -312,7 +364,7 @@ def install():
 
     functions = types.ModuleType("pyspark.sql.functions")
     for n in ("col", "lit", "when", "upper", "trim", "coalesce", "sum", "count",
-              "countDistinct"):
+              "countDistinct", "avg"):
         setattr(functions, n, globals()[n])
 
     sql = types.ModuleType("pyspark.sql")

@@ -300,9 +300,91 @@ def test_no_table():
               "no usable TRX table" in msg and "missing" in msg, msg[:200])
 
 
+def closing_frame() -> pd.DataFrame:
+    """Quotes, most lost. The whole point: inforce cannot see these."""
+    rows = []
+    # B3H: 4 quotes, 1 bound -> 0.25.  Each quote duplicated across 2 veh/dri rows,
+    # so a count(*) would give the wrong denominator and the same ratio for the
+    # wrong reason - the distinct-key count is what is being tested.
+    for q in range(4):
+        for _dup in range(2):
+            rows.append({"pol_quote_no": f"Q-B3H-{q}", "clo_bound_in": 1 if q == 0 else 0,
+                         "veh_fsa_tx": "B3H", "dri_type_cd": "Principal",
+                         "pol_jurisdiction_cd": "NS", "pol_uwcompany_cd": "snic",
+                         "veh_product_cd": "ppa", "pol_commercial_in": 0})
+    # B3J: 2 quotes, 2 bound -> 1.0
+    for q in range(2):
+        rows.append({"pol_quote_no": f"Q-B3J-{q}", "clo_bound_in": 1,
+                     "veh_fsa_tx": "B3J", "dri_type_cd": "Principal",
+                     "pol_jurisdiction_cd": "NS", "pol_uwcompany_cd": "prim",
+                     "veh_product_cd": "ppa", "pol_commercial_in": 0})
+    # wrong province, must not leak
+    rows.append({"pol_quote_no": "Q-NB-0", "clo_bound_in": 1,
+                 "veh_fsa_tx": "E1C", "dri_type_cd": "Principal",
+                 "pol_jurisdiction_cd": "NB", "pol_uwcompany_cd": "snic",
+                 "veh_product_cd": "ppa", "pol_commercial_in": 0})
+    return pd.DataFrame(rows)
+
+
+def test_elr_demand():
+    print("\n04_elr_all_variables_demand.py")
+    env, spark, adido = make_env({"as_of_date": "2026_03", "province": "NS",
+                                  "closing_table": "prod_40tdds.closing_vw",
+                                  "retention_table": "",
+                                  "output_table": "t_ap_ppa_pricing.elr_demand"})
+    inf = inf_frame()
+    inf["rat_fulldemand_closing_fc"] = 0.5
+    inf["rat_fulldemand_ft_retention_fc"] = 0.9
+    inf["rat_fulldemand_mt_retention_fc"] = 0.95
+    spark.register("t_ap_ppa_pricing.inf_ns_ppa_prep_2026_03_onlvl", inf)
+    spark.register("prod_40tdds.closing_vw", closing_frame())
+
+    run_nb("04_elr_all_variables_demand.py", env)
+    out = env["df_out"].toPandas()
+
+    check("output is long: one row per variable x level",
+          {"variable_name", "level_value"} <= set(out.columns), str(list(out.columns)[:5]))
+    check("more than one variable stacked", out["variable_name"].nunique() > 1,
+          str(out["variable_name"].unique()))
+    check("ELR columns still present", "LR_TOT" in out.columns and "LC_BI" in out.columns)
+    check("predicted demand carried through",
+          "pred_closing" in out.columns and float(out["pred_closing"].dropna().iloc[0]) == 0.5,
+          str(out.get("pred_closing", pd.Series()).head().tolist()))
+
+    fsa = out[out["variable_name"] == "veh_fsa_tx"]
+    b3h = fsa[fsa["level_value"] == "B3H"]
+    check("actual closing joined onto the FSA cell", len(b3h) == 1 and not pd.isna(b3h["quotes"].iloc[0]),
+          str(fsa[["level_value", "quotes", "bound", "closing_ratio"]].to_dict("records")))
+    check("closing counted on distinct quote, not the duplicated rows",
+          float(b3h["quotes"].iloc[0]) == 4.0, str(b3h["quotes"].tolist()))
+    check("closing ratio = bound / quotes = 0.25",
+          abs(float(b3h["closing_ratio"].iloc[0]) - 0.25) < 1e-9, str(b3h["closing_ratio"].tolist()))
+    check("NB quotes did not leak in",
+          "E1C" not in set(fsa["level_value"]), str(set(fsa["level_value"])))
+    check("retention actual null when no source supplied",
+          out["retention_actual"].isna().all(), str(out["retention_actual"].dropna().tolist()))
+    check("ADIDO called once for the stacked table",
+          len(adido) == 1 and adido[0]["freeForm"] == "ELR_Demand_AllVars", str(adido))
+
+
+def test_elr_demand_no_closing():
+    print("\n04 - closing view unreadable must degrade, not die")
+    env, spark, adido = make_env({"as_of_date": "2026_03", "province": "NS",
+                                  "closing_table": "prod_40tdds.does_not_exist",
+                                  "retention_table": "",
+                                  "output_table": ""})
+    spark.register("t_ap_ppa_pricing.inf_ns_ppa_prep_2026_03_onlvl", inf_frame())
+    run_nb("04_elr_all_variables_demand.py", env)
+    out = env["df_out"].toPandas()
+    check("still produces the ELR exhibit without closing", len(out) > 0, str(len(out)))
+    check("closing columns present but null", out["closing_ratio"].isna().all(),
+          str(out["closing_ratio"].dropna().tolist()))
+
+
 if __name__ == "__main__":
     for t in (test_trx, test_trx_missing_fsa, test_inforce, test_inforce_double_count_guard,
-              test_elr, test_elr_missing_rename_col, test_no_table):
+              test_elr, test_elr_missing_rename_col, test_no_table,
+              test_elr_demand, test_elr_demand_no_closing):
         try:
             t()
         except Exception:

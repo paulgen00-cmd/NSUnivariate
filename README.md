@@ -13,6 +13,7 @@ Source of the originals: issue #1 of this repo (body = TRX, comments = ELR and I
 | `01_trx_classification_fsa.py` | TRX extract | jurisdiction x company x accident year x FSA | ADIDO 3868, `TRX_fsa_tx` |
 | `02_inforce_classification_fsa.py` | Inforce extract | company x FSA | ADIDO 2569, `Inforce_fsa_tx` |
 | `03_elr_classification_fsa.py` | ELR extract | company x FSA | ADIDO 2569, `ELR_Inf_fsa_tx` |
+| `04_elr_all_variables_demand.py` | ELR extract, all variables | company x variable x level | ADIDO 2569, `ELR_Demand_AllVars` |
 
 **Each file is three cells.** The two `%run` lines must each sit alone in their own cell —
 Databricks rejects a `%run` that shares a cell with other code, and everything after it in
