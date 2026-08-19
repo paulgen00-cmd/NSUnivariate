@@ -1,0 +1,980 @@
+%md
+# Dislocation
+Autor: Jessie Wu
+- Dislocation with loss ratio
+- Dislocation by variable
+- All in one code for your use :)
+- The code itself does 4 onlevel - so total run time is about ~30 min
+
+%md
+## Instruction: 
+1. Input the RUO name in widget using available charts in Bitbucket
+2. Inforca as of date is the same date inforce is used for the filing
+3. province in upper case
+4. TRX as of date is the fisical year end date (eg: 2024-10-25, 2025-10-31)
+5. TRX date year type: nov-oct
+6. Put the variable name of your interest in the cell below add to the classification variables (developing)
+from ARRR import ARRR
+mclient = ARRR()
+mclient.update_files()
+province     = dbutils.widgets.get("province") #for filtering
+mclient.available_charts(product='PPA', region = province)
+c_variables = ["dri_type_cd_x_rat_km_work_nb",
+               "dri_type_cd_x_rat_km_business_nb",
+               "dri_type_cd_x_rat_km_annual_nb",
+               "dri_yrs_licensed_au_nb_x_dri_gender_cd",
+               "clt_p_holder_credit_score_no",
+               "veh_vicc_price_am",
+               "veh_rg_ab_no",
+               "veh_rg_dc_no",
+               "veh_rg_col_no",
+               "veh_rg_cmp_no",
+               "veh_fsa_tx"
+               ]
+
+# VARS <- c(
+#   "cov_tpl_limit_am",
+#   "cov_col_ded_am",
+#   "cov_cmp_ded_am",
+#   "veh_rg_ab_no", 
+#   "veh_rg_dc_no", 
+#   "veh_rg_col_no", 
+#   "veh_rg_cmp_no", 
+#   "number_au_mh", 
+#   "dri_yrs_licensed_au_nb",
+#   "exp_col_af_10yrs_nb",
+#   "exp_col_af_10yrs_avg_nb",
+#   "exp_minor_03yrs_nb",
+#   "exp_minor_03yrs_avg_nb",
+#   "exp_major_03yrs_nb",
+#   "exp_criminal_03yrs_nb",
+#   "exp_susp_minus_03yrs_nb",
+#   "exp_susp_plus_03yrs_nb",
+#   "veh_age_nb",
+#   "veh_vicc_price_am")
+
+#################### Interaction Variables ###############
+# dri_type_cd_x_number_au_mh_x_veh_dri_onp_nb
+# dri_type_cd_x_rat_km_work_nb
+# dri_type_cd_x_rat_km_business_nb
+# dri_type_cd_x_rat_km_annual_nb
+# "ter_onlvl_ibc_no"
+
+lower_bound =  -0.05
+upper_bound =  0.15
+bin_step    =  0.05
+%md
+# Part 1: Onlevel TRX
+##  PPA TRX Pipeline
+- Usage of code: Code to automatically extract most recent ppa trx table for all Atlantic Provinces
+- PATH to output: parquet file under t_ap_ppa_pricing/data/trx
+- Scheduled runtime: TBD
+- Average runtime: 1 minute
+
+%md
+---
+
+## Session()
+
+---
+from datetime import date, timedelta
+import pyspark.sql.functions as F
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from pyspark.ml.feature import Bucketizer
+import pyspark.pandas as ps
+import pandas as pd
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/Utils
+# PATH to adlss
+username = "t_ap_ppa_pricing"
+schema = "u_wuhanz5"
+az_name = "ca0tdi0cpa0001"
+abfss_root = f"abfss://home@edaaaazep{az_name}.dfs.core.windows.net"
+helper_path = f"{abfss_root}/{username}/data/mapping/"
+helper_path + "ap_trx_data_extract_helper.csv"
+# Import helper files
+helper_path = f"{abfss_root}/{username}/data/mapping/"
+
+varlist = spark.read.options(delimiter = ",", header = True).csv(helper_path + "ap_trx_data_extract_helper.csv").pandas_api()
+endsplit = spark.read.options(delimiter = ",", header = True).csv(helper_path + "endSplit.csv")
+msv = spark.read.options(delimiter = ",", header = True).csv(helper_path + "msvList.csv")
+
+# Convert Dataframe to list for easy sql implementation
+var_names = ",".join(varlist["var_name"].tolist())
+%md
+---
+
+## Params
+
+---
+# Date Parameter
+# today = date.today()  
+# as_of_date = find_last_friday(today)
+as_of_date = dbutils.widgets.get("trx_as_of_date") #for extraction 
+as_of_date_suffix = dbutils.widgets.get("trx_as_of_date_suffix")  # for export, "yyyymmdd" format
+dat_year_type = dbutils.widgets.get("trx_dat_year_type")  
+province     = dbutils.widgets.get("province") #for filtering
+RUO_chart_proposed    = dbutils.widgets.get("RUO_Proposed") #for selecting RUO version
+RUO_chart_current = dbutils.widgets.get("RUO_Current")
+RUO_chart_proposed_1  = RUO_chart_proposed[:-5].replace('.', '_')
+RUO_chart_current_1  = RUO_chart_current[:-5].replace('.', '_')
+
+print(f'TRX as of {as_of_date_suffix} with AY between {dat_year_type} will be extracted.')
+print(f'RUO {RUO_chart_current} with be used to On-level the current TRX.')
+print(f'RUO {RUO_chart_proposed} with be used to On-level the proposed TRX.')
+
+%skip
+hive_metastore.u_wuhanz5.inf_nl_ppa_prep_2025_12_nl_ppa_20260702_onlvl
+hive_metastore.u_wuhanz5.inf_nl_ppa_prep_2025_12_nl_ppa_20260827_sbr_onlvl
+
+hive_metastore.u_wuhanz5.trx_nl_ppa_prep_20251031_nl_ppa_20260702_onlvl
+hive_metastore.u_wuhanz5.trx_nl_ppa_prep_20251031_nl_ppa_20260827_sbr_onlvl
+%md
+---
+
+## Load data
+
+---
+# SQL script for TRX extract
+df = spark.sql(f"""
+select {var_names}
+        --,row_number() over (order by (select 1)) as index_id
+
+from prod_40tdds.tdds_ppod_actdata_auto_personal_trx_vw
+    where pol_region_cd = "AP" 
+        and dat_as_of_dt = "{as_of_date}"
+        and veh_product_cd in ("ppa")
+        and dat_year_type_tx = "{dat_year_type}"
+        and pol_commercial_in = 0
+        -- Removing null transaction information since they have no claim and no exposure assigned
+        and trx_offset_onset_cd is not null
+""")
+
+df.createOrReplaceTempView("df_temp")
+#df.display()
+df = df.filter(F.col("pol_jurisdiction_cd") == province)
+df.groupBy("pol_jurisdiction_cd").count().show()
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_DataPrep
+# Call the prep function
+df_prep = dataprep(df)
+
+# Test Ouput
+test_merge_df(df, df_prep)
+table_prep = f"{schema}.trx_{province.lower()}_ppa_prep_{as_of_date_suffix}"
+spark.sql(f"drop table if exists {table_prep}")
+df_prep.write.format("delta").mode("overwrite").saveAsTable(table_prep)
+print(f'TRX table name wil be {table_prep}')
+%md
+---
+
+## Onlevel Premiums
+
+---
+%md
+In order to Onlevel Premiums, we must:
+- Save the prepped dataframe as delta tables (by province) on the catalog
+- Setup the pyRate API and update the files from the MAP files repo
+- Fetch the most recent CHART by province
+- Call delta table and score using predict_spark then save as new delta table on the catalog
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Onlevel
+# Define unique keys for trx
+uniq_keys = ["clt_account_no", "pol_policy_no", "veh_id_no", "dri_id_no", "pol_eff_dt",
+             "trx_ent_dt", "trx_eff_dt", "trx_offset_onset_cd", "pol_acc_yr_dt", "pol_face_next_ent_dt"]
+## copy prepared table to your Schema
+## needed to copy 2 because we don't want to overite the onlevel tables
+spark.sql(f"drop table if exists {table_prep}_{RUO_chart_current_1}")
+spark.sql(f"drop table if exists {table_prep}_{RUO_chart_proposed_1}")
+spark.sql(f"""create table {table_prep}_{RUO_chart_current_1}
+          as select * from {table_prep}""")
+spark.sql(f"""create table {table_prep}_{RUO_chart_proposed_1}
+          as select * from {table_prep}""")
+# Score NB
+table_PROV_current = f"{table_prep}_{RUO_chart_current_1}"
+table_PROV_proposed = f"{table_prep}_{RUO_chart_proposed_1}"
+df_PROV_current = onlevel_premiums(table_PROV_current, "PPA", province, uniq_keys,chart = RUO_chart_current)
+df_PROV_proposed = onlevel_premiums(table_PROV_proposed, "PPA", province, uniq_keys,chart = RUO_chart_proposed)
+
+# Test Output
+test_merge_df(df, df_PROV_current)
+test_merge_df(df, df_PROV_proposed)
+%md
+---
+
+## Endorsement Split
+
+---
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Endorsement_Split
+df_final_current = df_PROV_current
+df_final_proposed = df_PROV_proposed
+# Map Endorsements names
+premiums = ["Prm_Trm_BI_Uncap_Am",
+            "Prm_Trm_PD_Uncap_Am",
+            "Prm_Trm_DC_Uncap_Am",
+            "Prm_Trm_AB_Uncap_Am",
+            "Prm_Trm_AP_COL_Uncap_Am",
+            "Prm_Trm_AP_SP_CMP_Uncap_Am",
+            "Prm_Trm_UA_Uncap_Am",
+            "Prm_Trm_UI_Uncap_Am"]
+
+endorsements = {"Prm_Trm_End_02_Uncap_Am": "End_02",
+                "Prm_Trm_End_06_Uncap_Am": "End_06A",
+                "Prm_Trm_End_16_Uncap_Am": "End_16",
+                "Prm_Trm_End_20_Uncap_Am": "End_20",
+                "Prm_Trm_End_23B_Uncap_Am": "End_23B",
+                "Prm_Trm_End_27_Uncap_Am": "End_27",
+                "Prm_Trm_End_27S_Uncap_Am": "End_27S",
+                "Prm_Trm_End_38_Uncap_Am": "End_38",
+                "Prm_Trm_End_43_Uncap_Am": "End_43",
+                "Prm_Trm_End_43R_Uncap_Am": "End_43R",
+                "Prm_Trm_End_43S_Uncap_Am": "End_43S",
+                "Prm_Trm_End_60S_Uncap_Am": "End_60", # Added the S but should be End_60S
+                "Prm_Trm_End_70_Uncap_Am": "End_70"}
+
+
+#Added for the End Split code
+# end_allocation = {
+#                 "End_06A",
+#                 "End_20",
+#                 "End_27",
+#                 "End_27S",
+#                 "End_38",
+#                 "End_43",
+#                 "End_43R",
+#                 "End_43S",
+#                 "End_60",
+#                 "End_70"}
+
+exposures = {"xpo_ern_chap_tpl_nb": "Xpo_Ern_TPL_Nb",
+             "xpo_ern_chap_bi_nb": "Xpo_Ern_BI_Nb",
+             "xpo_ern_chap_pd_nb": "Xpo_Ern_PD_Nb",
+             "xpo_ern_chap_dc_nb": "Xpo_Ern_DC_Nb",
+             "xpo_ern_chap_ab_nb": "Xpo_Ern_AB_Nb",
+             "xpo_ern_chap_um_nb": "Xpo_Ern_UA_Nb",
+             "xpo_ern_chap_col_nb": "Xpo_Ern_COL_Nb",
+             "xpo_ern_chap_cmp_nb": "Xpo_Ern_CMP_Nb",
+             "xpo_ern_chap_ap_nb": "Xpo_Ern_AP_Nb",
+             "xpo_ern_chap_spe_nb": "Xpo_Ern_SPE_Nb",
+             "xpo_ern_chap_ui_nb": "Xpo_Ern_UI_Nb"}
+
+# Rename Columns and recalculate AP/SP exposures
+df_final_current = df_final_current.withColumnsRenamed(endorsements) \
+  .withColumnsRenamed(exposures) \
+  .withColumn("Prm_Trm_COL_Uncap_Am", F.when(F.col("cov_ap_in") == 1, 0)
+                               .otherwise(F.col("Prm_Trm_COL_Uncap_Am"))) \
+  .withColumn("Prm_Trm_CMP_Uncap_Am", F.when(F.col("cov_ap_in") == 1, 0).otherwise(F.col("Prm_Trm_CMP_Uncap_Am"))) \
+  .withColumn("Xpo_Ern_COL_Nb", F.when(F.col("cov_ap_in") == 1, 0).otherwise(F.col("Xpo_Ern_COL_Nb"))) \
+  .withColumn("Xpo_Ern_CMP_Nb", F.when(F.col("cov_ap_in") == 1, 0).otherwise(F.col("Xpo_Ern_CMP_Nb"))) \
+  .withColumn("Prm_Trm_AP_COL_Uncap_Am", F.col("Coll_Portion_of_AP") + F.col("Prm_Trm_COL_Uncap_Am")) \
+  .withColumn("Prm_Trm_AP_SP_CMP_Uncap_Am", F.col("Prm_Trm_SP_Uncap_Am") + 
+              F.col("Comp_Portion_of_AP") + F.col("Prm_Trm_CMP_Uncap_Am")) \
+  .withColumn("Xpo_Ern_AP_COL_Nb", F.col("Xpo_Ern_AP_Nb") + F.col("Xpo_Ern_COL_Nb")) \
+  .withColumn("Xpo_Ern_AP_SP_CMP_Nb", F.col("Xpo_Ern_SPE_Nb") + F.col("Xpo_Ern_AP_Nb") + F.col("Xpo_Ern_CMP_Nb"))
+
+# Apply Endorsement Split Function
+df_final_current = split_endorsements(df_final_current, list(endorsements.values()), premiums, endsplit) #Changed that list(endorsements.values() to select End to allocate
+##########################################Proposed###########################################
+# Rename Columns and recalculate AP/SP exposures
+df_final_proposed = df_final_proposed.withColumnsRenamed(endorsements) \
+  .withColumnsRenamed(exposures) \
+  .withColumn("Prm_Trm_COL_Uncap_Am", F.when(F.col("cov_ap_in") == 1, 0)
+                               .otherwise(F.col("Prm_Trm_COL_Uncap_Am"))) \
+  .withColumn("Prm_Trm_CMP_Uncap_Am", F.when(F.col("cov_ap_in") == 1, 0).otherwise(F.col("Prm_Trm_CMP_Uncap_Am"))) \
+  .withColumn("Xpo_Ern_COL_Nb", F.when(F.col("cov_ap_in") == 1, 0).otherwise(F.col("Xpo_Ern_COL_Nb"))) \
+  .withColumn("Xpo_Ern_CMP_Nb", F.when(F.col("cov_ap_in") == 1, 0).otherwise(F.col("Xpo_Ern_CMP_Nb"))) \
+  .withColumn("Prm_Trm_AP_COL_Uncap_Am", F.col("Coll_Portion_of_AP") + F.col("Prm_Trm_COL_Uncap_Am")) \
+  .withColumn("Prm_Trm_AP_SP_CMP_Uncap_Am", F.col("Prm_Trm_SP_Uncap_Am") + 
+              F.col("Comp_Portion_of_AP") + F.col("Prm_Trm_CMP_Uncap_Am")) \
+  .withColumn("Xpo_Ern_AP_COL_Nb", F.col("Xpo_Ern_AP_Nb") + F.col("Xpo_Ern_COL_Nb")) \
+  .withColumn("Xpo_Ern_AP_SP_CMP_Nb", F.col("Xpo_Ern_SPE_Nb") + F.col("Xpo_Ern_AP_Nb") + F.col("Xpo_Ern_CMP_Nb"))
+
+# Apply Endorsement Split Function
+df_final_proposed = split_endorsements(df_final_proposed, list(endorsements.values()), premiums, endsplit) #Changed that list(endorsements.values() to select End to allocate
+%md
+---
+
+## Earning Premiums
+---
+# Calculate endorsement allocation per coverage
+for cov in ["BI", "PD", "DC", "AB", "AP_COL", "AP_SP_CMP", "UA"]:
+    prem_col = f"Prm_Trm_{cov}_Uncap_Am"
+        
+    df_final_current = df_final_current.withColumn(f"{cov}_Portion_All", 
+                                   F.col(f"Prm_Trm_{cov}_Uncap_Am_End") - F.col(prem_col) )
+    
+# Calculate Earned Premiums for each coverage
+for cov in ["BI", "PD", "DC", "AB", "AP_COL", "AP_SP_CMP", "UA", "UI"]:
+    prem_col = f"Prm_Trm_{cov}_Uncap_Am"
+        
+    df_final_current = df_final_current.withColumn(f"Prm_Ern_{cov}_OnLvl_Am", 
+                                   F.col(prem_col) * F.col(f"Xpo_Ern_{cov}_Nb"))
+
+# Calculate Earned Premiums with endorsement allocation for each coverage
+for cov in ["BI", "PD", "DC", "AB", "AP_COL", "AP_SP_CMP", "UA", "UI"]:
+    prem_col = f"Prm_Trm_{cov}_Uncap_Am"
+
+    # UI has no end allocation
+    if cov != "UI":
+        prem_col += "_End"
+        
+    df_final_current = df_final_current.withColumn(f"Prm_Ern_{cov}_OnLvl_End_Am", 
+                                   F.col(prem_col) * F.col(f"Xpo_Ern_{cov}_Nb"))
+# Calculate endorsement allocation per coverage
+for cov in ["BI", "PD", "DC", "AB", "AP_COL", "AP_SP_CMP", "UA"]:
+    prem_col = f"Prm_Trm_{cov}_Uncap_Am"
+        
+    df_final_proposed = df_final_proposed.withColumn(f"{cov}_Portion_All", 
+                                   F.col(f"Prm_Trm_{cov}_Uncap_Am_End") - F.col(prem_col) )
+    
+# Calculate Earned Premiums for each coverage
+for cov in ["BI", "PD", "DC", "AB", "AP_COL", "AP_SP_CMP", "UA", "UI"]:
+    prem_col = f"Prm_Trm_{cov}_Uncap_Am"
+        
+    df_final_proposed = df_final_proposed.withColumn(f"Prm_Ern_{cov}_OnLvl_Am", 
+                                   F.col(prem_col) * F.col(f"Xpo_Ern_{cov}_Nb"))
+
+# Calculate Earned Premiums with endorsement allocation for each coverage
+for cov in ["BI", "PD", "DC", "AB", "AP_COL", "AP_SP_CMP", "UA", "UI"]:
+    prem_col = f"Prm_Trm_{cov}_Uncap_Am"
+
+    # UI has no end allocation
+    if cov != "UI":
+        prem_col += "_End"
+        
+    df_final_proposed = df_final_proposed.withColumn(f"Prm_Ern_{cov}_OnLvl_End_Am", 
+                                   F.col(prem_col) * F.col(f"Xpo_Ern_{cov}_Nb"))
+%md
+## Export
+%skip
+# Final Test Before Data-Out 
+test_merge_df(test, df_final_current)
+test_merge_df(test, df_final_proposed)
+final_table_name_current = f"{schema}.trx_{province.lower()}_ppa_prep_onlvl_{as_of_date_suffix}_{RUO_chart_current_1}"
+final_table_name_proposed = f"{schema}.trx_{province.lower()}_ppa_prep_onlvl_{as_of_date_suffix}_{RUO_chart_proposed_1}"
+spark.sql(f"drop table if exists {final_table_name_current}")
+spark.sql(f"drop table if exists {final_table_name_proposed}")
+df_final_current.write.format("delta").mode("overwrite").saveAsTable(final_table_name_current)
+df_final_proposed.write.format("delta").mode("overwrite").saveAsTable(final_table_name_proposed)
+%md
+## ADIDO
+%md
+**ADIDO Used**
+
+ADIDO 3868 naming was created by Ontario for the On-leveled Trx.
+This ADIDO is compliant with the Atlantic Trx since the same variables are approved but might have slightly diferrent naming View vs Non-View and On-leveled Premium naming.
+%skip
+df_final_prov = spark.sql(f"""
+        select row_number() over (order by (select 1)) as index_id
+                ,*
+        from {schema}.trx_{province.lower()}_ppa_prep_onlvl_{as_of_date_suffix}_{RUO_chart_1}
+        where pol_jurisdiction_cd == "NB"
+        """)
+
+#df_final_prov = df_final_prov.filter(F.col("index_id") <= 300000)
+
+
+%skip
+df_final_prov.display()
+%skip
+as_of_folder = as_of_date[:-3].replace('-', '_')
+# NB TRX ADIDO
+adido_out(table = df_final_prov, ticket = 3868, filename = 'Trx_on_ppa_Ay_onlvl_wRels', freeForm = f'{province}_{as_of_date_suffix}_{RUO_chart_1}', folder_out = f't_ap_ppa_pricing/data/{province.lower()}/trx/{as_of_folder}/')
+
+%md
+# Part 2 Dislocation
+
+# Build splits for Bucketizer replicating R cut(..., right = FALSE)
+# breaks = [-inf, -0.10, -0.075, ..., 0.25, inf]
+seq_vals = [lower_bound + i * bin_step for i in range(int(round((upper_bound - lower_bound) / bin_step)) + 1)]
+splits = [-float("inf")] + seq_vals + [float("inf")]
+
+# Helper: build human-readable labels like "[-0.10, -0.075)"
+labels = []
+for i in range(len(splits) - 1):
+    left = splits[i]
+    right = splits[i + 1]
+    # Match R 'right = FALSE' => intervals are [left, right)
+    def fmt(x):
+        if x == float("inf"): return "Inf"
+        if x == -float("inf"): return "-Inf"
+        return f"{x:.3f}".rstrip('0').rstrip('.') if '.' in f"{x:.3f}" else f"{x:.3f}"
+    labels.append(f"[{fmt(left)}, {fmt(right)})")
+
+labels = [lbl.replace(", ",",") for lbl in labels]
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def add_rate_change_bucket(df, col_name="Rate_Change_Pc", out_col="Rate_Change_Level"):
+    bucket_col = out_col + "_idx"
+
+    bucketizer = Bucketizer(
+        splits=splits,
+        inputCol=col_name,
+        outputCol=bucket_col
+    )
+    df_b = bucketizer.setHandleInvalid("keep").transform(df)
+
+    labels_array = F.array(*[F.lit(l) for l in labels])
+
+    df_1 = df_b.withColumn(
+        out_col,
+        F.when(
+            F.col(bucket_col).isNull(),
+            F.lit(labels[0])  # choose your null/default label
+        ).otherwise(
+            F.element_at(
+                labels_array,
+                F.col(bucket_col).cast("int") + F.lit(1)  # element_at is 1-based
+            )
+        )
+    ).drop(bucket_col)
+
+    return df_1
+
+
+
+# 1) rat_km_annual_nb -> "0-5000", "5001-10000", ..., "20001+"
+def km_annual_group(col):
+    return (
+        F.when(col <= 5000, F.lit("0-5000"))
+         .when((col > 5000) & (col <= 10000), F.lit("5001-10000"))
+         .when((col > 10000) & (col <= 15000), F.lit("10001-15000"))
+         .when((col > 15000) & (col <= 20000), F.lit("15001-20000"))
+         .when(col > 20000, F.lit("20001+"))
+         .otherwise(F.lit(None))               # match R: keep NA as NA
+    )
+
+# 2) rat_km_work_nb -> "0", "1-5", "6-15", "16-30", "31+"
+def km_work_group(col):
+    return (
+        F.when(col == 0, F.lit("0"))
+         .when((col > 0) & (col <= 5),  F.lit("1-5"))
+         .when((col > 5) & (col <= 15), F.lit("6-15"))
+         .when((col > 15) & (col <= 30),F.lit("16-30"))
+         .when(col > 30, F.lit("31+"))
+         .otherwise(F.lit(None))               # NA stays NA
+    )
+
+# 3) rat_km_business_nb -> "0" / "1+"
+def km_business_group(col):
+    return F.when(col == 0, F.lit("0")).when(col > 0, F.lit("1+")).otherwise(F.lit(None))
+
+# 4) number_veh_in_family -> cap at >8 -> ">8" else keep as string
+def cap_gt8_as_str(col):
+    return F.when(col > 8, F.lit(">8")).otherwise(col.cast("string"))
+
+# 5) number_au_mh -> cap at >8 -> ">8" else keep as string
+def cap_au_mh_as_str(col):
+    return F.when(col > 8, F.lit(">8")).otherwise(col.cast("string"))
+
+# 6) veh_dri_onp_nb -> cap at >4 -> ">4" else keep as string
+def cap_onp_as_str(col):
+    return F.when(col > 4, F.lit(">4")).otherwise(col.cast("string"))
+
+# 7) NA fill for numerics (ifelse(is.na(x), default, x))
+def nz_num(col, default):
+    return F.coalesce(col, F.lit(default))
+
+# 8) NA fill for strings (ifelse(is.na(x), default, x))
+def nz_str(col, default="N"):
+    return F.coalesce(col, F.lit(default))
+
+# 9) veh_age_nb -> "10+" if > 10, otherwise keep numeric as string
+def veh_age_bucket(col):
+    return F.when(col > 10, F.lit("10+")).otherwise(col.cast("string"))
+
+# 10) veh_vicc_price_am -> banding; NA or <=0 -> "Not Available"
+def price_band(col):
+    return (
+        F.when((col > 0)    & (col < 10000),  F.lit("0-9999"))
+         .when((col >= 10000) & (col < 15000), F.lit("10000-14999"))
+         .when((col >= 15000) & (col < 20000), F.lit("15000-19999"))
+         .when((col >= 20000) & (col < 25000), F.lit("20000-24999"))
+         .when((col >= 25000) & (col < 30000), F.lit("25000-29999"))
+         .when((col >= 30000) & (col < 35000), F.lit("30000-34999"))
+         .when((col >= 35000) & (col < 40000), F.lit("35000-39999"))
+         .when((col >= 40000) & (col < 45000), F.lit("40000-44999"))
+         .when((col >= 45000) & (col < 50000), F.lit("45000-49999"))
+         .when((col >= 50000) & (col < 55000), F.lit("50000-54999"))
+         .when((col >= 55000) & (col < 60000), F.lit("55000-59999"))
+         .when((col >= 60000) & (col < 65000), F.lit("60000-64999"))
+         .when((col >= 65000) & (col < 70000), F.lit("65000-69999"))
+         .when((col >= 70000) & (col < 75000), F.lit("70000-74999"))
+         .when((col >= 75000) & (col < 80000), F.lit("75000-79999"))
+         .when((col >= 80000) & (col < 85000), F.lit("80000-84999"))
+         .when((col >= 85000) & (col < 90000), F.lit("85000-89999"))
+         .when((col >= 90000) & (col < 95000), F.lit("90000-94999"))
+         .when((col >= 95000) & (col < 100000),F.lit("95000-99999"))
+         .when((col >= 100000) & (col < 125000), F.lit("100000-124999"))
+         .when((col >= 125000) & (col < 150000), F.lit("125000-149999"))
+         .when((col >= 150000) & (col < 200000), F.lit("150000-199999"))
+         .when(col >= 200000, F.lit("200000+"))
+         .otherwise(F.lit("Not Available"))   # matches R's TRUE ~ "Not Available"
+    )
+
+# 11) pol_uwcompany_cd -> map snic->SN, prim->PIC, else "TDHA"; keep NA as NA
+def map_company(col):
+    return (
+        F.when(col == F.lit("snic"), F.lit("SN"))
+         .when(col == F.lit("prim"), F.lit("PIC"))
+         # for any other non-null code -> "TDHA"; if null -> null (like R ifelse with NA)
+         .otherwise(F.when(col.isNull(), F.lit(None)).otherwise(F.lit("TDHA")))
+    )
+
+def nz(col):
+    return F.coalesce(col, F.lit(0.0))
+
+def coalesce_any(df, names):
+    # returns F.coalesce of all candidates that exist; else F.lit(0.0)
+    existing = [F.col(c) for c in names if c in df.columns]
+    return F.coalesce(*existing) if existing else F.lit(0.0)
+# 2) TRX Vehicle (5Y)
+
+
+df_trx_curr = df_final_current
+df_trx_prop = df_final_proposed
+
+# Keys for join
+uniq_keys_trx = [
+    "pol_insurer_no", "clt_account_no", "pol_policy_no", "veh_id_no", "dri_id_no",
+    "pol_eff_dt", "trx_eff_dt", "trx_ent_dt", "pol_acc_yr_dt", "trx_offset_onset_cd",
+    "pol_jurisdiction_cd", "vehicle_driver_version_key"
+]
+
+# Rename proposed on-level premium columns: "_OnLvl_Am" -> "_OnLvl_Am_Prop"
+for c in df_trx_prop.columns:
+    if c.endswith("_OnLvl_Am"):
+        df_trx_prop = df_trx_prop.withColumnRenamed(c, c.replace("_OnLvl_Am", "_OnLvl_Am_Prop"))
+
+# From proposed, select uniq_keys + pol_uwcompany_cd + all *_OnLvl_Am_Prop
+prop_ol_cols = [c for c in df_trx_prop.columns if c.endswith("_OnLvl_Am_Prop")]
+keep_prop = list(dict.fromkeys(uniq_keys_trx + ["pol_uwcompany_cd"] + prop_ol_cols))
+df_trx_prop1 = df_trx_prop.select(*[c for c in keep_prop if c in df_trx_prop.columns])
+
+# Join and compute earned premiums and claims
+df_trx_veh = (
+    df_trx_curr.alias("cur")
+    .join(df_trx_prop1.alias("prop"), on=uniq_keys_trx + ["pol_uwcompany_cd"], how="left")
+    # Current earned (Uncap == OnLvl earned here)
+    .withColumn("Prm_Trm_BI_Uncap_Am_Ern",  nz(F.col("Prm_Ern_BI_OnLvl_Am")))
+    .withColumn("Prm_Trm_PD_Uncap_Am_Ern",  nz(F.col("Prm_Ern_PD_OnLvl_Am")))
+    .withColumn("Prm_Trm_DC_Uncap_Am_Ern",  nz(F.col("Prm_Ern_DC_OnLvl_Am")))
+    .withColumn("Prm_Trm_AB_Uncap_Am_Ern",  nz(F.col("Prm_Ern_AB_OnLvl_Am")))
+    .withColumn("Prm_Trm_UA_Uncap_Am_Ern",  nz(F.col("Prm_Ern_UA_OnLvl_Am")))
+    .withColumn("Prm_Trm_AP_COL_Uncap_Am_Ern", nz(F.col("Prm_Ern_AP_COL_OnLvl_Am")))
+    .withColumn("Prm_Trm_AP_SP_COMP_Uncap_Am_Ern", nz(F.col("Prm_Ern_AP_SP_CMP_OnLvl_Am")))
+    .withColumn("Prm_Trm_UI_Uncap_Am_Ern",  nz(F.col("Prm_Ern_UI_OnLvl_Am")))
+    .withColumn("Prm_Trm_TOT_Uncap_Am_Ern",
+                F.col("Prm_Trm_BI_Uncap_Am_Ern")+F.col("Prm_Trm_PD_Uncap_Am_Ern")+F.col("Prm_Trm_DC_Uncap_Am_Ern")
+              + F.col("Prm_Trm_AB_Uncap_Am_Ern")+F.col("Prm_Trm_UA_Uncap_Am_Ern")+F.col("Prm_Trm_AP_COL_Uncap_Am_Ern")
+              + F.col("Prm_Trm_AP_SP_COMP_Uncap_Am_Ern")+F.col("Prm_Trm_UI_Uncap_Am_Ern"))
+
+    # Proposed earned
+    .withColumn("Prm_Trm_BI_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_BI_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_PD_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_PD_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_DC_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_DC_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_AB_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_AB_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_UA_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_UA_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_AP_COL_Uncap_Am_Prop_Ern", nz(F.col("Prm_Ern_AP_COL_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_AP_SP_COMP_Uncap_Am_Prop_Ern", nz(F.col("Prm_Ern_AP_SP_CMP_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_UI_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_UI_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_TOT_Uncap_Am_Prop_Ern",
+                F.col("Prm_Trm_BI_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_PD_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_DC_Uncap_Am_Prop_Ern")
+              + F.col("Prm_Trm_AB_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_UA_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_AP_COL_Uncap_Am_Prop_Ern")
+              + F.col("Prm_Trm_AP_SP_COMP_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_UI_Uncap_Am_Prop_Ern"))
+
+    # Claims (capped where appropriate)
+    .withColumn("Clm_Tot_Am", nz(F.col("clm_chap_bi_cap500k_am")) + nz(F.col("clm_chap_pd_am")) + nz(F.col("clm_chap_dc_am"))
+                                + nz(F.col("clm_chap_ab_cap500k_am")) + nz(F.col("clm_chap_um_am")) + nz(F.col("clm_chap_col_am"))
+                                + nz(F.col("clm_chap_cmp_am")) + nz(F.col("clm_chap_ui_am")))
+)
+
+
+# Aggregate to vehicle level
+veh_group = [
+    "pol_acc_yr_dt", "pol_uwcompany_cd", "pol_insurer_no",
+    "clt_account_no", "pol_policy_no", "veh_id_no"
+]
+df_trx_veh_agg = (
+    df_trx_veh.groupBy(*veh_group)
+    .agg(
+        F.sum("Prm_Trm_TOT_Uncap_Am_Ern").alias("Prm_Trm_Veh_Base_Uncap_Am"),
+        F.sum("Prm_Trm_TOT_Uncap_Am_Prop_Ern").alias("Prm_Trm_Veh_Base_Uncap_Am_Prop"),
+        F.sum("Clm_Tot_Am").alias("clm_veh_chap_tot_am")
+    )
+    .withColumn("Rate_Change_Pc",
+                F.when(F.col("Prm_Trm_Veh_Base_Uncap_Am") == 0, F.lit(None))
+                 .otherwise(F.col("Prm_Trm_Veh_Base_Uncap_Am_Prop") / F.col("Prm_Trm_Veh_Base_Uncap_Am") - F.lit(1.0)))
+)
+
+df_trx_veh_binned = add_rate_change_bucket(df_trx_veh_agg, "Rate_Change_Pc", "Rate_Change_Level")
+
+df_trx_veh_fin = (
+    df_trx_veh_binned.groupBy("Rate_Change_Level", "pol_acc_yr_dt", "pol_uwcompany_cd")
+    .agg(
+        F.sum("Prm_Trm_Veh_Base_Uncap_Am").alias("Prm_Trm_Veh_Base_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_Veh_Base_Uncap_Am_Prop").alias("Prm_Trm_Veh_Base_Uncap_Am_Prop_Sum"),
+        F.sum("clm_veh_chap_tot_am").alias("clm_veh_chap_tot_am")
+    )
+)
+
+df_trx_veh_fin.display()
+# -----------------------------------------------------------------------------
+# 3) TRX Driver (5Y)
+# -----------------------------------------------------------------------------
+# Attach Rate_Change_Level back to each TRX row at the driver level
+df_trx_dri = df_trx_curr.alias("cur").join(
+    df_trx_veh_binned.select("pol_acc_yr_dt", "pol_uwcompany_cd", "pol_insurer_no", "clt_account_no", "pol_policy_no", "veh_id_no", "Rate_Change_Level").alias("veh"),
+    on=["pol_acc_yr_dt", "pol_uwcompany_cd", "pol_insurer_no", "clt_account_no", "pol_policy_no", "veh_id_no"],
+    how="left"
+)
+
+# Join proposed earned columns
+df_trx_dri_prop = (
+    df_trx_dri.join(df_trx_prop1, on=uniq_keys_trx + ["pol_uwcompany_cd"], how="left")
+    # Current earned
+    .withColumn("Prm_Trm_BI_Uncap_Am_Ern",  nz(F.col("Prm_Ern_BI_OnLvl_Am")))
+    .withColumn("Prm_Trm_PD_Uncap_Am_Ern",  nz(F.col("Prm_Ern_PD_OnLvl_Am")))
+    .withColumn("Prm_Trm_DC_Uncap_Am_Ern",  nz(F.col("Prm_Ern_DC_OnLvl_Am")))
+    .withColumn("Prm_Trm_AB_Uncap_Am_Ern",  nz(F.col("Prm_Ern_AB_OnLvl_Am")))
+    .withColumn("Prm_Trm_UA_Uncap_Am_Ern",  nz(F.col("Prm_Ern_UA_OnLvl_Am")))
+    .withColumn("Prm_Trm_AP_COL_Uncap_Am_Ern", nz(F.col("Prm_Ern_AP_COL_OnLvl_Am")))
+    .withColumn("Prm_Trm_AP_SP_COMP_Uncap_Am_Ern", nz(F.col("Prm_Ern_AP_SP_CMP_OnLvl_Am")))
+    .withColumn("Prm_Trm_UI_Uncap_Am_Ern",  nz(F.col("Prm_Ern_UI_OnLvl_Am")))
+    .withColumn("Prm_Trm_TOT_Uncap_Am_Ern",
+                F.col("Prm_Trm_BI_Uncap_Am_Ern")+F.col("Prm_Trm_PD_Uncap_Am_Ern")+F.col("Prm_Trm_DC_Uncap_Am_Ern")
+              + F.col("Prm_Trm_AB_Uncap_Am_Ern")+F.col("Prm_Trm_UA_Uncap_Am_Ern")+F.col("Prm_Trm_AP_COL_Uncap_Am_Ern")
+              + F.col("Prm_Trm_AP_SP_COMP_Uncap_Am_Ern")+F.col("Prm_Trm_UI_Uncap_Am_Ern"))
+
+    # Proposed earned
+    .withColumn("Prm_Trm_BI_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_BI_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_PD_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_PD_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_DC_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_DC_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_AB_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_AB_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_UA_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_UA_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_AP_COL_Uncap_Am_Prop_Ern", nz(F.col("Prm_Ern_AP_COL_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_AP_SP_COMP_Uncap_Am_Prop_Ern", nz(F.col("Prm_Ern_AP_SP_CMP_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_UI_Uncap_Am_Prop_Ern",  nz(F.col("Prm_Ern_UI_OnLvl_Am_Prop")))
+    .withColumn("Prm_Trm_TOT_Uncap_Am_Prop_Ern",
+                F.col("Prm_Trm_BI_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_PD_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_DC_Uncap_Am_Prop_Ern")
+              + F.col("Prm_Trm_AB_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_UA_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_AP_COL_Uncap_Am_Prop_Ern")
+              + F.col("Prm_Trm_AP_SP_COMP_Uncap_Am_Prop_Ern")+F.col("Prm_Trm_UI_Uncap_Am_Prop_Ern"))
+    # Derived user variables
+    .withColumn("rat_km_annual_nb",   km_annual_group(F.col("rat_km_annual_nb")))
+    .withColumn("rat_km_work_nb",     km_work_group(F.col("rat_km_work_nb")))
+    .withColumn("rat_km_business_nb", km_business_group(F.col("rat_km_business_nb")))
+    .withColumn("number_veh_in_family", cap_gt8_as_str(F.col("number_veh_in_family")))
+    .withColumn("number_au_mh",         cap_au_mh_as_str(F.col("number_au_mh")))
+    .withColumn("veh_dri_onp_nb",       cap_onp_as_str(F.col("veh_dri_onp_nb")))
+
+    .withColumn("exp_col_af_10yrs_nb",     nz_num(F.col("exp_col_af_10yrs_nb"), 0))
+    .withColumn("exp_col_af_10yrs_avg_nb", nz_num(F.col("exp_col_af_10yrs_avg_nb"), 99))
+    .withColumn("exp_minor_03yrs_nb",      nz_num(F.col("exp_minor_03yrs_nb"), 0))
+    .withColumn("exp_minor_03yrs_avg_nb",  nz_num(F.col("exp_minor_03yrs_avg_nb"), 99))
+    .withColumn("exp_major_03yrs_nb",      nz_num(F.col("exp_major_03yrs_nb"), 0))
+    .withColumn("exp_criminal_03yrs_nb",   nz_num(F.col("exp_criminal_03yrs_nb"), 0))
+    .withColumn("exp_susp_minus_03yrs_nb", nz_num(F.col("exp_susp_minus_03yrs_nb"), 0))
+    .withColumn("exp_susp_plus_03yrs_nb",  nz_num(F.col("exp_susp_plus_03yrs_nb"), 0))
+
+    .withColumn("cov_cmp_ded_am", nz_str(F.col("cov_cmp_ded_am"), "N"))
+    .withColumn("cov_col_ded_am", nz_str(F.col("cov_col_ded_am"), "N"))
+
+    .withColumn("veh_age_nb",        veh_age_bucket(F.col("veh_age_nb")))
+    .withColumn("veh_vicc_price_am", price_band(F.col("veh_vicc_price_am")))
+
+)
+
+
+
+
+# Grouping columns (like R cols_to_keep)
+cols_to_keep_dri = [
+    "Rate_Change_Level",
+    "pol_acc_yr_dt",
+    "pol_uwcompany_cd"]\
+    + c_variables\
+    + ["pol_business_cd"]
+    
+
+df_trx_dri_fin2 = (
+    df_trx_dri_prop.groupBy(*cols_to_keep_dri)
+    .agg(
+        F.sum("Prm_Trm_BI_Uncap_Am_Ern").alias("Prm_Trm_BI_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_PD_Uncap_Am_Ern").alias("Prm_Trm_PD_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_DC_Uncap_Am_Ern").alias("Prm_Trm_DC_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_AB_Uncap_Am_Ern").alias("Prm_Trm_AB_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_UA_Uncap_Am_Ern").alias("Prm_Trm_UA_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_AP_COL_Uncap_Am_Ern").alias("Prm_Trm_COL_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_AP_SP_COMP_Uncap_Am_Ern").alias("Prm_Trm_CMP_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_UI_Uncap_Am_Ern").alias("Prm_Trm_UI_Uncap_Am_Sum"),
+        F.sum("Prm_Trm_TOT_Uncap_Am_Ern").alias("Prm_Trm_Base_Uncap_Am_Sum"),
+
+        F.sum("Prm_Trm_BI_Uncap_Am_Prop_Ern").alias("Prm_Trm_BI_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_PD_Uncap_Am_Prop_Ern").alias("Prm_Trm_PD_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_DC_Uncap_Am_Prop_Ern").alias("Prm_Trm_DC_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_AB_Uncap_Am_Prop_Ern").alias("Prm_Trm_AB_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_UA_Uncap_Am_Prop_Ern").alias("Prm_Trm_UA_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_AP_COL_Uncap_Am_Prop_Ern").alias("Prm_Trm_COL_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_AP_SP_COMP_Uncap_Am_Prop_Ern").alias("Prm_Trm_CMP_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_UI_Uncap_Am_Prop_Ern").alias("Prm_Trm_UI_Uncap_Am_Prop_Sum"),
+        F.sum("Prm_Trm_TOT_Uncap_Am_Prop_Ern").alias("Prm_Trm_Dri_Base_Uncap_Am_Prop_Sum"),
+
+        F.sum(nz(F.col("clm_chap_bi_cap500k_am"))).alias("clm_chap_bi_cap500k_am"),
+        F.sum(nz(F.col("clm_chap_pd_am"))).alias("clm_chap_pd_am"),
+        F.sum(nz(F.col("clm_chap_dc_am"))).alias("clm_chap_dc_am"),
+        F.sum(nz(F.col("clm_chap_ab_cap500k_am"))).alias("clm_chap_ab_cap500k_am"),
+        F.sum(nz(F.col("clm_chap_um_am"))).alias("clm_chap_um_am"),
+        F.sum(nz(F.col("clm_chap_col_am"))).alias("clm_chap_col_am"),
+        F.sum(nz(F.col("clm_chap_cmp_am"))).alias("clm_chap_cmp_am"),
+        F.sum(nz(F.col("clm_chap_ui_am"))).alias("clm_chap_ui_am"),
+        (F.sum(nz(F.col("clm_chap_bi_cap500k_am")) + nz(F.col("clm_chap_pd_am")) + nz(F.col("clm_chap_dc_am"))
+             + nz(F.col("clm_chap_ab_cap500k_am")) + nz(F.col("clm_chap_um_am")) + nz(F.col("clm_chap_col_am"))
+             + nz(F.col("clm_chap_cmp_am")) + nz(F.col("clm_chap_ui_am")))).alias("clm_chap_tot_am")
+    )
+)
+df_trx_dri_fin2.display()
+%md
+# ADIDO Out
+# Piggy back off of existing ADIDO for dislocation
+df_trx_veh_fin_output = df_trx_veh_fin
+
+adido_out(table = df_trx_veh_fin_output, ticket = 2569, filename = 'inf_ap_ppa_prep_onlvl', freeForm = f"TRX_by_Vehicle_{RUO_chart_current_1}-{RUO_chart_proposed_1}", fileformat='parquet', folder_out = f't_ap_ppa_pricing/data/{province.lower()}/dislocation/')
+# df_trx_dri_fin_output = df_trx_dri_fin2.toDF(*['evaldate',
+#                       'no_company',
+#                       'cd_province',
+#                       'product_adj',
+#                       'coverage_corpo',
+#                       'coverage_uw',
+#                       'accyr',	'indemnity',	'alae',	'ulae',	'recovery',	'reserve',	'grosspaid',	'netpaid',	'netpaid_limited',	'grossincurred',	
+#                       'netincurred',	'netincurred_limited',	'rt_open_claims_cov',	'rt_closed_claims_cov',	'rt_closed_claims_with_payment_cov',	'rt_open_claims_fcov',	'rt_closed_claims_fcov',	'rt_closed_claims_with_payment_fcov',	'rt_open_claims_cov_uw',	'rt_closed_claims_cov_uw',	'rt_closed_claims_with_payment_cov_uw',	'cat_indemnity',	'cat_alae',	'cat_ulae',
+#                       'cat_recovery',	'cat_reserve',	'cat_grosspaid'
+
+#                      ])
+df_trx_dri_fin_output = df_trx_dri_fin2
+
+adido_out(table = df_trx_dri_fin_output, ticket = 2569, filename = 'inf_ap_ppa_prep_onlvl', freeForm = f"TRX_by_Driver_{RUO_chart_current_1}-{RUO_chart_proposed_1}", fileformat='parquet', folder_out = f't_ap_ppa_pricing/data/{province.lower()}/dislocation/')
+%md
+# Inforce for Dislocation
+# Date Parameter
+# today = date.today()  
+# as_of_date = find_last_friday(today)
+as_of_date = dbutils.widgets.get("inf_as_of_date")
+as_of_dt_f1  = as_of_date.replace("-", "")
+as_of_dt_f2  = as_of_dt_f1[:-2]
+as_of_dt_f3  = as_of_date[:-3].replace('-', '_')
+print(f'Inforce as of {as_of_date} will be extracted')
+print(f'as_of_date {as_of_date}')
+print(f'as_of_dt_f1 {as_of_dt_f1}')
+print(f'as_of_dt_f2 {as_of_dt_f2}')
+print(f'as_of_dt_f3 {as_of_dt_f3}')
+
+# SQL script for Inforce extract
+df = spark.sql(f"""
+            select *
+
+            from prod_40tdds.tdds_ppod_actdata_inf_auto_personal_vw
+                where pol_region_cd in ('AP') 
+                    and dat_as_of_dt in ('{as_of_date}')
+                    and veh_product_cd in ('ppa', 'motor_home')
+                    and pol_commercial_in = 0
+                    and pol_jurisdiction_cd in ('{province}')
+""")
+
+df.groupBy("pol_jurisdiction_cd").count().show()
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_DataPrep_Inforce
+# Call the prep function
+df_prep = dataprep(df)
+
+# Test Ouput
+test_merge_df(df, df_prep)
+# Switched to GA2M 20260108 
+df_lc = spark.sql(f"""
+                select pol_jurisdiction_cd, veh_product_cd, vehicle_driver_version_key,
+                lc_losscost_bi_pred_rebase, lc_losscost_pd_pred_rebase, lc_losscost_dc_pred_rebase,
+                lc_losscost_ab_pred_rebase, lc_losscost_coll_pred_rebase, lc_losscost_comp_pred_rebase,
+                lc_losscost_total_pred_rebase
+
+                from p_auto_lc.daily_lc_ga2m_ppa_policy_scored_master_t0
+                where pol_region_cd in ('AP')
+                    and veh_product_cd in ('ppa', 'motor_home')
+""")
+
+print(f"Loss Cost taken from table daily_lc_ga2m_ppa_policy_scored_master_t0")
+
+# # Merge with Inforce table
+df_prep_lc = df_prep.join(df_lc, on = ['vehicle_driver_version_key', 'pol_jurisdiction_cd', 'veh_product_cd'], how = 'left') \
+    .withColumnRenamed("lc_losscost_bi_pred_rebase", "lc_losscost_bi_pred_am") \
+    .withColumnRenamed("lc_losscost_pd_pred_rebase", "lc_losscost_pd_pred_am") \
+    .withColumnRenamed("lc_losscost_dc_pred_rebase", "lc_losscost_dc_pred_am") \
+    .withColumnRenamed("lc_losscost_ab_pred_rebase", "lc_losscost_ab_pred_am") \
+    .withColumnRenamed("lc_losscost_coll_pred_rebase", "lc_losscost_col_pred_am") \
+    .withColumnRenamed("lc_losscost_comp_pred_rebase", "lc_losscost_cmp_pred_am") \
+    .withColumnRenamed("lc_losscost_total_pred_rebase", "lc_losscost_total_pred_am")
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_CLEAR_Onlevel
+# Check latest CLEAR table available in the Catalog
+clear_tables = []
+tables = dbutils.fs.ls(f"{abfss_root}/{username}/databaseSchema")
+
+# Iterate over tables in AP PPA Pricing Schema
+for table in tables:
+    table_name = table.name.rstrip('/')
+    if table_name.startswith('ibc_clear_'):
+        clear_tables.append(table_name)
+
+# Take the max value from list of CLEAR tables
+clear_year = int(max(clear_tables)[-4:])
+print(f"CLEAR {clear_year} will be used")
+df_prep_clear = onlevel_clear_vrg(df_prep_lc, clear_year)
+
+# Test Ouput
+test_merge_df(df, df_prep_clear)
+table_inf_current = f'{schema}.inf_{province.lower()}_ppa_prep_{as_of_dt_f3}_{RUO_chart_current_1}'
+table_inf_proposed = f'{schema}.inf_{province.lower()}_ppa_prep_{as_of_dt_f3}_{RUO_chart_proposed_1}'
+
+spark.sql(f'drop table if exists {table_inf_current}')
+df_prep_clear.write.format("delta").mode('overwrite').saveAsTable(table_inf_current)
+spark.sql(f'drop table if exists {table_inf_proposed}')
+df_prep_clear.write.format("delta").mode('overwrite').saveAsTable(table_inf_proposed)
+%md
+## Onlevel with RUOs
+uniq_keys = ["pol_policy_no", "veh_id_no", "dri_id_no", "pol_eff_dt"]
+df_inf_current = onlevel_premiums(table_inf_current, 'PPA', province, uniq_keys,chart = RUO_chart_current)
+df_inf_proposed = onlevel_premiums(table_inf_proposed, 'PPA', province, uniq_keys,chart = RUO_chart_proposed)
+# Test Output
+test_merge_df(df, df_inf_current)
+test_merge_df(df, df_inf_proposed)
+inf_cur  = df_inf_current
+inf_prop = df_inf_proposed
+
+# Rename proposed columns: replace "Uncap_Am" -> "Uncap_Am_Prop"
+for c in inf_prop.columns:
+    if c.endswith("Uncap_Am"):
+        inf_prop = inf_prop.withColumnRenamed(c, c.replace("Uncap_Am", "Uncap_Am_Prop"))
+
+# Select from proposed: columns that start with "Prm_Trm_" + uniq keys + pol_uwcompany_cd
+uniq_keys_inf = ["pol_policy_no", "veh_id_no", "dri_id_no", "pol_eff_dt"]
+prop_keep = [c for c in inf_prop.columns if c.startswith("Prm_Trm_")] + uniq_keys_inf + ["pol_uwcompany_cd"]
+prop_keep = list(dict.fromkeys([c for c in prop_keep if c in inf_prop.columns]))  # unique + exist
+inf_prop_sel = inf_prop.select(*prop_keep)
+
+# Join
+inf_join = (
+    inf_cur.alias("cur")
+    .join(inf_prop_sel.alias("prop"), on=uniq_keys_inf + ["pol_uwcompany_cd"], how="left")
+)
+
+# Window to sum to vehicle level but keep row-level context => like dplyr group_by + mutate(sum(...))
+w_veh = Window.partitionBy(
+    "pol_uwcompany_cd", "pol_insurer_no", "clt_account_no", "pol_policy_no", "veh_id_no"
+)
+
+# Handle SP_COMP vs SP_CMP naming by coalesce
+col_cmp_cur  = coalesce_any(inf_join, ["Prm_Trm_AP_SP_CMP_Uncap_Am", "Prm_Trm_AP_SP_COMP_Uncap_Am"])
+col_cmp_prop = coalesce_any(inf_join, ["Prm_Trm_AP_SP_CMP_Uncap_Am_Prop", "Prm_Trm_AP_SP_COMP_Uncap_Am_Prop"])
+
+inf_veh = (
+    inf_join
+    # Current vehicle-level sums
+    .withColumn("Prm_Trm_Veh_BI_Uncap_Am",       F.sum(nz(F.col("Prm_Trm_BI_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_PD_Uncap_Am",       F.sum(nz(F.col("Prm_Trm_PD_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_DC_Uncap_Am",       F.sum(nz(F.col("Prm_Trm_DC_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_AB_Uncap_Am",       F.sum(nz(F.col("Prm_Trm_AB_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_UA_Uncap_Am",       F.sum(nz(F.col("Prm_Trm_UA_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_AP_COL_Uncap_Am",   F.sum(nz(F.col("Prm_Trm_AP_COL_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am", F.sum(nz(col_cmp_cur)).over(w_veh))
+    .withColumn("Prm_Trm_Veh_UI_Uncap_Am",       F.sum(nz(F.col("Prm_Trm_UI_Uncap_Am"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_Base_Uncap_Am",     F.sum(nz(F.col("Prm_Trm_Dri_Base_Uncap_Am"))).over(w_veh))
+
+    # Proposed vehicle-level sums
+    .withColumn("Prm_Trm_Veh_BI_Uncap_Am_Prop",       F.sum(nz(F.col("Prm_Trm_BI_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_PD_Uncap_Am_Prop",       F.sum(nz(F.col("Prm_Trm_PD_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_DC_Uncap_Am_Prop",       F.sum(nz(F.col("Prm_Trm_DC_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_AB_Uncap_Am_Prop",       F.sum(nz(F.col("Prm_Trm_AB_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_UA_Uncap_Am_Prop",       F.sum(nz(F.col("Prm_Trm_UA_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_AP_COL_Uncap_Am_Prop",   F.sum(nz(F.col("Prm_Trm_AP_COL_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am_Prop", F.sum(nz(col_cmp_prop)).over(w_veh))
+    .withColumn("Prm_Trm_Veh_UI_Uncap_Am_Prop",       F.sum(nz(F.col("Prm_Trm_UI_Uncap_Am_Prop"))).over(w_veh))
+    .withColumn("Prm_Trm_Veh_Base_Uncap_Am_Prop",     F.sum(nz(F.col("Prm_Trm_Dri_Base_Uncap_Am_Prop"))).over(w_veh))
+
+    # Rate change
+    .withColumn("Rate_Change_Pc",
+                F.when(F.col("Prm_Trm_Veh_Base_Uncap_Am") == 0, F.lit(None))
+                 .otherwise(F.col("Prm_Trm_Veh_Base_Uncap_Am_Prop") / F.col("Prm_Trm_Veh_Base_Uncap_Am") - F.lit(1.0)))
+)
+
+# Keep principal driver only and de-duplicate at vehicle level
+veh_keys = ["pol_uwcompany_cd", "pol_insurer_no", "clt_account_no", "pol_policy_no", "veh_id_no"]
+inf_veh_principal = (
+    inf_veh
+    .filter(F.col("dri_type_cd") == F.lit("Principal"))
+    .dropDuplicates(veh_keys)
+)
+
+# Add buckets and convenience variables (km group & mandatory only)
+inf_veh_binned = (
+    add_rate_change_bucket(inf_veh_principal, "Rate_Change_Pc", "Rate_Change_Level")
+    .withColumn("rat_km_annual_nb",   km_annual_group(F.col("rat_km_annual_nb")))
+    .withColumn("rat_km_work_nb",     km_work_group(F.col("rat_km_work_nb")))
+    .withColumn("rat_km_business_nb", km_business_group(F.col("rat_km_business_nb")))
+    .withColumn("number_veh_in_family", cap_gt8_as_str(F.col("number_veh_in_family")))
+    .withColumn("number_au_mh",         cap_au_mh_as_str(F.col("number_au_mh")))
+    .withColumn("veh_dri_onp_nb",       cap_onp_as_str(F.col("veh_dri_onp_nb")))
+
+    .withColumn("exp_col_af_10yrs_nb",     nz_num(F.col("exp_col_af_10yrs_nb"), 0))
+    .withColumn("exp_col_af_10yrs_avg_nb", nz_num(F.col("exp_col_af_10yrs_avg_nb"), 99))
+    .withColumn("exp_minor_03yrs_nb",      nz_num(F.col("exp_minor_03yrs_nb"), 0))
+    .withColumn("exp_minor_03yrs_avg_nb",  nz_num(F.col("exp_minor_03yrs_avg_nb"), 99))
+    .withColumn("exp_major_03yrs_nb",      nz_num(F.col("exp_major_03yrs_nb"), 0))
+    .withColumn("exp_criminal_03yrs_nb",   nz_num(F.col("exp_criminal_03yrs_nb"), 0))
+    .withColumn("exp_susp_minus_03yrs_nb", nz_num(F.col("exp_susp_minus_03yrs_nb"), 0))
+    .withColumn("exp_susp_plus_03yrs_nb",  nz_num(F.col("exp_susp_plus_03yrs_nb"), 0))
+
+    .withColumn("cov_cmp_ded_am", nz_str(F.col("cov_cmp_ded_am"), "N"))
+    .withColumn("cov_col_ded_am", nz_str(F.col("cov_col_ded_am"), "N"))
+
+    .withColumn("veh_age_nb",        veh_age_bucket(F.col("veh_age_nb")))
+    .withColumn("veh_vicc_price_am", price_band(F.col("veh_vicc_price_am")))
+    .withColumn("Mandatory_Only",
+                F.when(nz(F.col("Prm_Trm_Veh_AP_COL_Uncap_Am")) + nz(F.col("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am")) == 0, F.lit(1)).otherwise(F.lit(0)))
+)
+
+# Group and aggregate like R summarise
+cols_to_keep = [
+    "Rate_Change_Level",
+    "pol_uwcompany_cd",
+    "pol_business_cd"]\
+        + c_variables
+
+inf_final = (
+    inf_veh_binned.groupBy(*cols_to_keep)
+    .agg(
+        F.count(F.lit(1)).alias("Xpo_Tot"),
+        F.sum(F.when(nz(F.col("Prm_Trm_Veh_AP_COL_Uncap_Am")) > 0, F.lit(1)).otherwise(F.lit(0))).alias("Xpo_Col"),
+        F.sum(F.when(nz(F.col("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am")) > 0, F.lit(1)).otherwise(F.lit(0))).alias("Xpo_Cmp"),
+
+        F.sum(nz(F.col("Prm_Trm_Veh_BI_Uncap_Am"))).alias("Prm_Trm_Veh_BI_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_PD_Uncap_Am"))).alias("Prm_Trm_Veh_PD_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_DC_Uncap_Am"))).alias("Prm_Trm_Veh_DC_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_AB_Uncap_Am"))).alias("Prm_Trm_Veh_AB_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_UA_Uncap_Am"))).alias("Prm_Trm_Veh_UA_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_AP_COL_Uncap_Am"))).alias("Prm_Trm_Veh_AP_COL_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am"))).alias("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_UI_Uncap_Am"))).alias("Prm_Trm_Veh_UI_Uncap_Am_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_Base_Uncap_Am"))).alias("Prm_Trm_Veh_Base_Uncap_Am_Sum"),
+
+        F.sum(nz(F.col("Prm_Trm_Veh_BI_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_BI_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_PD_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_PD_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_DC_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_DC_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_AB_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_AB_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_UA_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_UA_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_AP_COL_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_AP_COL_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_UI_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_UI_Uncap_Am_Prop_Sum"),
+        F.sum(nz(F.col("Prm_Trm_Veh_Base_Uncap_Am_Prop"))).alias("Prm_Trm_Veh_Base_Uncap_Am_Prop_Sum"),
+    )
+)
+inf_final.display()
+inf_final_out = inf_final
+adido_out(table = inf_final_out, ticket = 2569, filename = 'inf_ap_ppa_prep_onlvl', freeForm = f"Inf_by_Vehicle_{RUO_chart_current_1}-{RUO_chart_proposed_1}", fileformat='parquet', folder_out = f't_ap_ppa_pricing/data/{province.lower()}/dislocation/')
