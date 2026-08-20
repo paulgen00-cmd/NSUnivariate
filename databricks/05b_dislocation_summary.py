@@ -22,14 +22,24 @@
 # Dislocation section of the README for exactly what that changes.
 # ============================================================================
 
-# ============================================================================
-# CELL 1 - paste alone
-# ============================================================================
+# ############################################################################
+# HOW TO PASTE THIS IN -- read this or the first two cells silently do nothing.
+#
+# A Databricks magic only works as the FIRST LINE of its cell. Paste ONLY the
+# `%run ...` line into CELL 1 and CELL 2 -- NOT the comment above it. A comment
+# above the magic makes Databricks treat the cell as ordinary Python, the %run
+# is skipped, and nothing it should load is ever defined. The symptom is a
+# NameError several cells later.
+#
+# CELL 3 preflights the names both %run cells should have loaded.
+# ############################################################################
+
+# --- CELL 1: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Classification
 
-# ============================================================================
-# CELL 2 - paste alone
-# ============================================================================
+# --- CELL 2: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/Utils
 
 # ============================================================================
@@ -41,6 +51,22 @@ from operator import add
 import pyspark.sql.functions as F
 from pyspark.sql.window import Window
 from pyspark.ml.feature import Bucketizer
+
+# --- preflight: did both %run cells actually take? -------------------------
+_NEEDS = [("ClassificationPrep", "CELL 1  AP_PPA_Classification"),
+          ("test_merge_df",      "CELL 2  Utils"),
+          ("adido_out",          "CELL 2  Utils")]
+_gone = [f"  {name:<20} expected from {src}" for name, src in _NEEDS
+         if name not in globals()]
+if _gone:
+    raise NameError(
+        "These names are missing, so the %run cell that loads each did not take:"
+        + chr(10) + chr(10).join(_gone) + """
+
+A Databricks %run only works as the FIRST LINE of its cell. Paste ONLY the
+`%run ...` line -- never the `# --- CELL n` comment above it -- then re-run
+those cells from the top.""")
+print("preflight ok: all shared functions loaded")
 
 _DEFAULTS = {
     "province":              "NS",

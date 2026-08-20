@@ -150,6 +150,32 @@ _join_at = REFACTOR.index("def join_sides")
 check("company map precedes the joins", _map_at < _join_at, True)
 
 # ---------------------------------------------------------------------------
+# 2b. Every %run cell must be guarded
+# ---------------------------------------------------------------------------
+# A Databricks magic is skipped unless it is the first line of its cell, so a
+# mis-pasted %run silently loads nothing and fails as a NameError much later.
+# Both notebooks preflight the names their %run cells should define.
+print("%run guards")
+for label, text, n_runs in [("05a", SCORE, 6), ("05b", REFACTOR, 2)]:
+    runs = re.findall(r"^%run (\S+)", text, re.M)
+    check(f"{label} has {n_runs} %run lines", len(runs), n_runs)
+    # No %run may have a comment on the line directly above it -- that is the
+    # exact mistake that kills the magic.
+    lines = text.split(chr(10))
+    bad = [l for i, l in enumerate(lines)
+           if l.startswith("%run") and i and lines[i - 1].strip().startswith("#")]
+    check(f"{label} no comment directly above a %run", bad, [])
+    check(f"{label} preflights the loaded names", "preflight ok" in text, True)
+    check(f"{label} names the paste mistake", "FIRST LINE of its cell" in text, True)
+
+# 05a's two dataprep captures must be guarded, since that is where the missing
+# name actually surfaced.
+check("05a guards dataprep_trx",
+      "try:" + chr(10) + "    dataprep_trx = dataprep" in SCORE, True)
+check("05a guards dataprep_inf",
+      "try:" + chr(10) + "    dataprep_inf = dataprep" in SCORE, True)
+
+# ---------------------------------------------------------------------------
 # 3. Aggregate output column names, in order
 # ---------------------------------------------------------------------------
 def scrape_aliases(text, start_marker, end_marker):

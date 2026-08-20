@@ -18,47 +18,70 @@
 #
 # THIS NOTEBOOK MAKES EXACTLY ONE onlevel_premiums CALL. Do not add a second.
 #
-# Cells are marked below. The %run lines must each sit alone in their own cell.
+# ############################################################################
+# HOW TO PASTE THIS IN -- read this or the first cell silently does nothing.
+#
+# A Databricks magic only works as the FIRST LINE of its cell. Paste ONLY the
+# `%run ...` line into each %run cell -- NOT the `# CELL n` banner above it.
+# A banner above the magic makes Databricks treat the cell as ordinary Python,
+# the %run is skipped, and the functions it should load are never defined. The
+# symptom is a NameError several cells later, e.g. "name 'dataprep' is not
+# defined".
+#
+# CELL 9 preflights every name the %run cells should have loaded and names the
+# ones that are missing, so run it before starting an 8-minute scoring.
+# ############################################################################
 # ============================================================================
 
-# ============================================================================
-# CELL 1 - paste alone
-# ============================================================================
+# --- CELL 1: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/Utils
 
-# ============================================================================
-# CELL 2 - paste alone
-# ============================================================================
+# --- CELL 2: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Onlevel
 
-# ============================================================================
-# CELL 3 - paste alone
-# ============================================================================
+# --- CELL 3: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Endorsement_Split
 
-# ============================================================================
-# CELL 4 - paste alone
-# ============================================================================
+# --- CELL 4: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_DataPrep
 
 # ============================================================================
 # CELL 5 - capture the TRX dataprep before the inforce %run rebinds the name
 # ============================================================================
-dataprep_trx = dataprep
+try:
+    dataprep_trx = dataprep
+except NameError:
+    raise NameError("""`dataprep` is not defined, so CELL 4 did not take.
+A Databricks %run only works as the FIRST LINE of its cell. If you pasted the
+'# --- CELL 4' comment above it, the magic was skipped.
+Fix: put ONLY this line in that cell, with nothing above it:
+    %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_DataPrep
+then re-run CELL 4 and CELL 5.""")
 
-# ============================================================================
-# CELL 6 - paste alone
-# ============================================================================
+# --- CELL 6: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_DataPrep_Inforce
 
 # ============================================================================
 # CELL 7 - capture the inforce dataprep
 # ============================================================================
-dataprep_inf = dataprep
+try:
+    dataprep_inf = dataprep
+except NameError:
+    raise NameError("""`dataprep` is not defined, so CELL 6 did not take.
+Put ONLY this line in that cell, with nothing above it:
+    %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_DataPrep_Inforce
+then re-run CELL 6 and CELL 7.""")
 
-# ============================================================================
-# CELL 8 - paste alone
-# ============================================================================
+# `dataprep` now refers to the inforce version. dataprep_trx / dataprep_inf are
+# the two captured names -- use those from here on, never bare `dataprep`.
+
+# --- CELL 8: paste ONLY the next line, nothing above it ---------------------
+
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_CLEAR_Onlevel
 
 # ============================================================================
@@ -66,6 +89,26 @@ dataprep_inf = dataprep
 # ============================================================================
 import pyspark.sql.functions as F
 from ARRR import ARRR
+
+# --- preflight: did every %run cell actually take? -------------------------
+_NEEDS = [("test_merge_df",      "CELL 1  Utils"),
+          ("adido_out",          "CELL 1  Utils"),
+          ("onlevel_premiums",   "CELL 2  AP_PPA_Onlevel"),
+          ("split_endorsements", "CELL 3  AP_PPA_Endorsement_Split"),
+          ("dataprep_trx",       "CELL 4+5  AP_PPA_DataPrep"),
+          ("dataprep_inf",       "CELL 6+7  AP_PPA_DataPrep_Inforce"),
+          ("onlevel_clear_vrg",  "CELL 8  AP_PPA_CLEAR_Onlevel")]
+_gone = [f"  {name:<20} expected from {src}" for name, src in _NEEDS
+         if name not in globals()]
+if _gone:
+    raise NameError(
+        "These names are missing, so the %run cell that loads each did not take:"
+        + chr(10) + chr(10).join(_gone) + """
+
+A Databricks %run only works as the FIRST LINE of its cell. Paste ONLY the
+`%run ...` line -- never the `# --- CELL n` comment above it -- then re-run
+those cells from the top.""")
+print("preflight ok: all shared functions loaded")
 
 _DEFAULTS = {
     "dataset":               "trx",                      # trx | inf

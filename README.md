@@ -17,10 +17,17 @@ Source of the originals: issue #1 of this repo (body = TRX, comments = ELR and I
 | `05a_dislocation_score.py` | part 1 of the root `dislocation` notebook | one dataset x one chart | a scored delta table |
 | `05b_dislocation_summary.py` | part 2 of the root `dislocation` notebook | vehicle / driver x rate-change band | ADIDO 2569, three parquet files |
 
-**Each file is three cells.** The two `%run` lines must each sit alone in their own cell —
-Databricks rejects a `%run` that shares a cell with other code, and everything after it in
-that cell never runs. Cell 3 is the whole rest of the file, pasted in one go. The widgets
-create themselves with defaults, so nothing has to exist beforehand.
+**Cells are marked in each file.** Every `%run` line is its own cell, and you must paste
+**only that line** — not the `# --- CELL n` comment above it. A Databricks magic is only
+honoured as the **first line** of its cell; a comment above it turns the cell into ordinary
+Python, the `%run` is skipped, nothing it should load gets defined, and the failure shows
+up as a `NameError` several cells later. The remaining marked cell is the whole rest of the
+file, pasted in one go. Widgets create themselves with defaults, so nothing has to exist
+beforehand.
+
+`05a`/`05b` preflight this: their first Python cell lists every name the `%run` cells
+should have loaded and raises naming the ones that are missing, before any 8-minute
+scoring starts.
 
 Widgets are unchanged: `province` + `as_of_date_suffix` (TRX) or `as_of_date` (inforce/ELR).
 
