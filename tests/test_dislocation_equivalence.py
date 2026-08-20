@@ -18,7 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ORIGINAL = (ROOT / "dislocation").read_text(encoding="utf-8")
-REFACTOR = (ROOT / "databricks" / "05_dislocation.py").read_text(encoding="utf-8")
+SCORE = (ROOT / "databricks" / "05a_dislocation_score.py").read_text(encoding="utf-8")
+REFACTOR = (ROOT / "databricks" / "05b_dislocation_summary.py").read_text(encoding="utf-8")
 
 FAILURES = []
 
@@ -215,6 +216,64 @@ print("ADIDO exports")
 for free in ["TRX_by_Vehicle_", "TRX_by_Driver_", "Inf_by_Vehicle_"]:
     check(f"{free} present", free in REFACTOR, True)
 check("ticket 2569", REFACTOR.count("ticket=2569"), 1)  # one loop, three files
+
+
+# ---------------------------------------------------------------------------
+# 7. The 05a/05b split
+# ---------------------------------------------------------------------------
+# The whole point of the split is that a run never submits two scorings. If a
+# second onlevel_premiums call ever creeps back into 05a, the failure this
+# structure exists to avoid comes straight back.
+print("one scoring per execution")
+check("05a calls onlevel_premiums once",
+      len(re.findall(r'(?<!def )onlevel_premiums\(', SCORE)), 1)
+check("05b never calls pyRate", "onlevel_premiums(" in REFACTOR, False)
+check("05b never imports ARRR", "ARRR" in REFACTOR, False)
+
+# 05a writes tables, 05b reads them by name. If the two templates drift, 05b
+# raises "missing input table" and nobody can tell which side is wrong.
+def table_templates(text):
+    """Every f-string that looks like a schema-qualified table name, with the
+    chart-suffix variable normalised so 05a's {CHART} matches 05b's {CUR}."""
+    found = re.findall(r'f"(\{schema\}\.[^"]+)"', text)
+    return {re.sub(r'\{(CHART|CUR|PRP)\}', '{C}', t) for t in found}
+
+score_tables = table_templates(SCORE)
+summary_tables = table_templates(REFACTOR)
+
+trx_template = "{schema}.trx_{province.lower()}_ppa_prep_onlvl_{as_of_date_suffix}_{C}"
+inf_template = "{schema}.inf_{province.lower()}_ppa_prep_{as_of_dt_f3}_{C}"
+
+print("05a output names match 05b input names")
+check("TRX table in 05a", trx_template in score_tables, True)
+check("TRX table in 05b", trx_template in summary_tables, True)
+check("INF table in 05a", inf_template in score_tables, True)
+# 05b reads the pyRate output, which is the 05a table plus the _onlvl suffix
+# that onlevel_premiums appends.
+check("INF table in 05b", inf_template + "_onlvl" in summary_tables, True)
+
+# chart_suffix must be character-identical in both files, or the table names
+# built by 05a and looked up by 05b diverge for any chart with a dot suffix.
+def extract_chart_suffix(text, label):
+    src = text[text.index("def chart_suffix"):]
+    src = src[:src.index("\n\n")]
+    ns = {}
+    exec(src, ns)
+    return ns["chart_suffix"]
+
+print("chart_suffix agrees between 05a and 05b")
+_a = extract_chart_suffix(SCORE, "05a")
+_b = extract_chart_suffix(REFACTOR, "05b")
+for chart in ["NS.PPA.20260702.json", "NS.PPA.20261214.S8.json",
+              "NS.PPA.20261214_cs.json", "NL.PPA.20260827.sbr.json",
+              "  NS.PPA.20260702.json  ", "NS.PPA.20261214.S8"]:
+    check(f"suffix agrees for {chart!r}", _a(chart.strip()), _b(chart))
+
+# The four table names 05b resolves must be exactly the four 05a can produce.
+check("05b resolves four inputs", REFACTOR.count('("trx", "current")')
+      + REFACTOR.count('("trx", "proposed")')
+      + REFACTOR.count('("inf", "current")')
+      + REFACTOR.count('("inf", "proposed")') >= 4, True)
 
 
 print()

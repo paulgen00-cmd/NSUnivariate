@@ -14,7 +14,8 @@ Source of the originals: issue #1 of this repo (body = TRX, comments = ELR and I
 | `02_inforce_classification_fsa.py` | Inforce extract | company x FSA | ADIDO 2569, `Inforce_fsa_tx` |
 | `03_elr_classification_fsa.py` | ELR extract | company x FSA | ADIDO 2569, `ELR_Inf_fsa_tx` |
 | `04_elr_all_variables_demand.py` | ELR extract, all variables | company x variable x level | ADIDO 2569, `ELR_Demand_AllVars` |
-| `05_dislocation.py` | the root `dislocation` notebook | vehicle / driver x rate-change band | ADIDO 2569, three parquet files |
+| `05a_dislocation_score.py` | part 1 of the root `dislocation` notebook | one dataset x one chart | a scored delta table |
+| `05b_dislocation_summary.py` | part 2 of the root `dislocation` notebook | vehicle / driver x rate-change band | ADIDO 2569, three parquet files |
 
 **Each file is three cells.** The two `%run` lines must each sit alone in their own cell —
 Databricks rejects a `%run` that shares a cell with other code, and everything after it in
@@ -56,33 +57,54 @@ before the output table shows up, the `while` condition ends the loop and the la
 and the crash lands one cell later. **The scoring job failed; the `NoneType` is the
 messenger.**
 
-Two guards are now in `dislocation` itself:
+On the NS run that hit this, the proposed chart resolved fine — `available_charts`
+listed `NS.PPA.20261214.S8.json` and `chart_reference` returned. What fails is the
+**second scoring in one session**: the same chart scores successfully when it is the only
+`onlevel_premiums` call in a run. That is why 05a/05b split along that line.
+
+Two guards are in `dislocation` itself so the next failure of any kind reports itself
+properly:
 
 - `RUO_chart_*_1` was derived with `chart[:-5]`, which assumes the widget value ends in
-  `.json`. Entered without the extension, it chops five real characters off the name —
+  `.json`. Entered without the extension it chops five real characters off the name —
   the copy tables get a truncated suffix *and* the `chart=` argument never resolves.
   Suffix derivation now strips `.json` only if it is there, and both widget values are
-  checked against `mclient.available_charts`.
+  checked against `mclient.available_charts`. This was not the NS cause, but it is a live
+  trap for any chart name typed without the extension.
 - `onlevel_premiums_checked()` verifies the input table exists and is non-empty, resolves
   the chart *before* the long poll (a bad name now fails in seconds, not after a full
   scoring cycle), and raises with the chart and table named if the result is `None`.
 
-If it still fails, the pyRate log names the cause — most often an input column the
-proposed CHART needs that `dataprep` does not build.
+### Run it as `05a` four times, then `05b` once
 
-### `databricks/05_dislocation.py`
+The original calls `onlevel_premiums` twice back to back in one session. The first
+succeeds; the second reaches `Failed` within ~60 seconds. Scoring one chart per
+execution works, so the pipeline is split along that line:
 
-Same three outputs, reorganised to be easier to run:
+```
+05a  dataset=trx  RUO_Chart=<current>    ->  trx_<prov>_ppa_prep_onlvl_<suffix>_<CUR>
+05a  dataset=trx  RUO_Chart=<proposed>   ->  trx_<prov>_ppa_prep_onlvl_<suffix>_<PRP>
+05a  dataset=inf  RUO_Chart=<current>    ->  inf_<prov>_ppa_prep_<f3>_<CUR>_onlvl
+05a  dataset=inf  RUO_Chart=<proposed>   ->  inf_<prov>_ppa_prep_<f3>_<PRP>_onlvl
+05b                                      ->  the three ADIDO 2569 files
+```
 
-- widgets self-create with defaults, so it runs on attach
-- current and proposed are **one** code path called twice — the original repeats the
-  endorsement-split, earning and 8-coverage premium blocks two to three times each
-- `RESUME_SCORED = True` reuses on-levels already on disk, so a crash in part 2 costs
-  seconds instead of another 30 minutes. Set it `False` after a `dataprep` change or a
-  republished CHART.
-- `RUN_ADIDO = False` builds and displays everything without exporting
-- the TRX and inforce `dataprep` functions are captured as `dataprep_trx` / `dataprep_inf`
-  before the second `%run` can shadow the first
+**`05a_dislocation_score.py`** makes exactly one `onlevel_premiums` call — the test
+suite enforces that, because a second one reintroduces the failure this split exists
+to avoid. It resolves the chart against `available_charts` and calls `chart_reference`
+*before* the poll, so a bad chart fails in seconds rather than after a scoring cycle,
+and raises with the chart and table named if the result is `None`. It prints the raw
+row count; that number must match between the current and proposed runs of the same
+dataset.
+
+**`05b_dislocation_summary.py`** calls pyRate zero times, so it runs in minutes and can
+be re-run freely. It checks all four input tables exist — naming the exact 05a
+invocation for any that are missing — and refuses to proceed if the current and
+proposed row counts differ, which would mean the two runs saw different source data.
+
+Everything else is the original logic, with the current/proposed duplication collapsed:
+the original repeats the endorsement-split, earning and 8-coverage premium blocks two to
+three times each.
 
 Known behaviour carried over deliberately, **not** fixed:
 
@@ -105,11 +127,13 @@ fixtures — 22 checks. It is not Spark and does not replace a cluster run; see
 python tests/test_dislocation_equivalence.py
 ```
 
-Checks `05_dislocation.py` against the original `dislocation` for every part that does not
-need Spark: the rate-change splits and labels (at four different bin settings), the 21
-vehicle price bands, and the aggregate output column names in order for all three
-exhibits — each compared against the literals scraped out of the original file. It does
-**not** execute the joins, window sums, `split_endorsements`, or the scoring.
+Checks `05a`/`05b` against the original `dislocation` for every part that does not need
+Spark: the rate-change splits and labels (at four bin settings), the 21 vehicle price
+bands, and the aggregate output column names in order for all three exhibits — each
+compared against the literals scraped out of the original file. It also enforces the
+split itself: 05a makes exactly one scoring call, 05b makes none, and the table names
+05a writes are the ones 05b reads, with `chart_suffix` identical in both. It does **not**
+execute the joins, window sums, `split_endorsements`, or the scoring.
 
 ## Audit
 
