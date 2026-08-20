@@ -117,8 +117,41 @@ dat_year_type = dbutils.widgets.get("trx_dat_year_type")
 province     = dbutils.widgets.get("province") #for filtering
 RUO_chart_proposed    = dbutils.widgets.get("RUO_Proposed") #for selecting RUO version
 RUO_chart_current = dbutils.widgets.get("RUO_Current")
-RUO_chart_proposed_1  = RUO_chart_proposed[:-5].replace('.', '_')
-RUO_chart_current_1  = RUO_chart_current[:-5].replace('.', '_')
+# --- CHART name handling -------------------------------------------------
+# A bare [:-5] assumes the widget value ends in '.json'. If it does not it
+# silently chops five real characters off the name: the copy tables get a
+# truncated suffix AND the value passed as chart= never resolves, so pyRate
+# fails, onlevel_premiums returns None, and the crash surfaces one cell later
+# as "'NoneType' object has no attribute 'count'" inside test_merge_df.
+_available_charts = mclient.available_charts(product='PPA', region=province)
+
+def _normalize_chart(value, label):
+    """Return the CHART file name as pyRate lists it; warn if it is unlisted."""
+    name = str(value).strip()
+    if not name.lower().endswith('.json'):
+        name += '.json'
+    if name not in _available_charts:
+        print(f"*** WARNING: {label} chart {name!r} is not in available_charts for "
+              f"PPA/{province}. Scoring will fail unless pyRate resolves it anyway.")
+        print(f"    Available: {_available_charts}")
+    return name
+
+def _chart_suffix(chart_name):
+    """Table-safe suffix from a CHART file name."""
+    base = chart_name[:-5] if chart_name.lower().endswith('.json') else chart_name
+    return base.replace('.', '_')
+
+RUO_chart_current    = _normalize_chart(RUO_chart_current,  'RUO_Current')
+RUO_chart_proposed   = _normalize_chart(RUO_chart_proposed, 'RUO_Proposed')
+RUO_chart_current_1  = _chart_suffix(RUO_chart_current)
+RUO_chart_proposed_1 = _chart_suffix(RUO_chart_proposed)
+
+if RUO_chart_current_1 == RUO_chart_proposed_1:
+    raise ValueError('RUO_Current and RUO_Proposed resolve to the same CHART -- '
+                     'the current and proposed copy tables would collide.')
+
+print(f'current  CHART {RUO_chart_current}  -> table suffix {RUO_chart_current_1}')
+print(f'proposed CHART {RUO_chart_proposed} -> table suffix {RUO_chart_proposed_1}')
 
 print(f'TRX as of {as_of_date_suffix} with AY between {dat_year_type} will be extracted.')
 print(f'RUO {RUO_chart_current} with be used to On-level the current TRX.')
@@ -178,6 +211,37 @@ In order to Onlevel Premiums, we must:
 - Fetch the most recent CHART by province
 - Call delta table and score using predict_spark then save as new delta table on the catalog
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Onlevel
+# --- guarded wrapper around the shared onlevel_premiums ------------------
+# The shared onlevel_premiums polls until the _onlvl table appears, and its
+# only exit WITH a DataFrame is the break. When the pyRate job reaches
+# 'Failed' first, the while condition ends the loop and it returns None --
+# no exception raised. This wrapper raises where the failure happens, naming
+# the chart and table, instead of letting it land in the next test_merge_df.
+def onlevel_premiums_checked(input_table, product, province, uniq_keys, chart, label):
+    if not spark.catalog.tableExists(input_table):
+        raise ValueError(f'[{label}] input table {input_table} does not exist')
+    n_in = spark.table(input_table).count()
+    if n_in == 0:
+        raise ValueError(f'[{label}] input table {input_table} is empty')
+
+    # Resolve the chart BEFORE the long poll -- a bad chart name then fails
+    # here in seconds instead of after a full scoring cycle.
+    mclient.chart_reference(chart, product, province)
+    print(f'[{label}] scoring {input_table} ({n_in:,} rows) against {chart}')
+
+    scored = onlevel_premiums(input_table, product, province, uniq_keys, chart=chart)
+
+    if scored is None:
+        raise RuntimeError(
+            f"""[{label}] pyRate scoring FAILED -- onlevel_premiums returned None.
+  input  : {input_table}
+  output : {input_table}_onlvl  (never created)
+  chart  : {chart}
+The job status reached 'Failed' before the output table appeared. Scroll up to
+the last '---- Iteration N ----' block for the pyRate error -- most often an
+input column the proposed CHART needs that dataprep does not build.""")
+    return scored
+
 # Define unique keys for trx
 uniq_keys = ["clt_account_no", "pol_policy_no", "veh_id_no", "dri_id_no", "pol_eff_dt",
              "trx_ent_dt", "trx_eff_dt", "trx_offset_onset_cd", "pol_acc_yr_dt", "pol_face_next_ent_dt"]
@@ -192,8 +256,10 @@ spark.sql(f"""create table {table_prep}_{RUO_chart_proposed_1}
 # Score NB
 table_PROV_current = f"{table_prep}_{RUO_chart_current_1}"
 table_PROV_proposed = f"{table_prep}_{RUO_chart_proposed_1}"
-df_PROV_current = onlevel_premiums(table_PROV_current, "PPA", province, uniq_keys,chart = RUO_chart_current)
-df_PROV_proposed = onlevel_premiums(table_PROV_proposed, "PPA", province, uniq_keys,chart = RUO_chart_proposed)
+df_PROV_current  = onlevel_premiums_checked(table_PROV_current,  "PPA", province, uniq_keys,
+                                            chart=RUO_chart_current,  label="TRX current")
+df_PROV_proposed = onlevel_premiums_checked(table_PROV_proposed, "PPA", province, uniq_keys,
+                                            chart=RUO_chart_proposed, label="TRX proposed")
 
 # Test Output
 test_merge_df(df, df_PROV_current)
@@ -840,8 +906,10 @@ df_prep_clear.write.format("delta").mode('overwrite').saveAsTable(table_inf_prop
 %md
 ## Onlevel with RUOs
 uniq_keys = ["pol_policy_no", "veh_id_no", "dri_id_no", "pol_eff_dt"]
-df_inf_current = onlevel_premiums(table_inf_current, 'PPA', province, uniq_keys,chart = RUO_chart_current)
-df_inf_proposed = onlevel_premiums(table_inf_proposed, 'PPA', province, uniq_keys,chart = RUO_chart_proposed)
+df_inf_current  = onlevel_premiums_checked(table_inf_current,  'PPA', province, uniq_keys,
+                                           chart=RUO_chart_current,  label='INF current')
+df_inf_proposed = onlevel_premiums_checked(table_inf_proposed, 'PPA', province, uniq_keys,
+                                           chart=RUO_chart_proposed, label='INF proposed')
 # Test Output
 test_merge_df(df, df_inf_current)
 test_merge_df(df, df_inf_proposed)
