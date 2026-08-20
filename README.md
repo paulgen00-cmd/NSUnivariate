@@ -102,6 +102,44 @@ be re-run freely. It checks all four input tables exist — naming the exact 05a
 invocation for any that are missing — and refuses to proceed if the current and
 proposed row counts differ, which would mean the two runs saw different source data.
 
+### Bucketing comes from `ClassificationPrep`
+
+05b calls the shared `ClassificationPrep` — the same function `01`/`02` use — instead of
+the km / price / veh-age / cap chain the original hand-rolls. That is a **deliberate
+change to the cell boundaries**, so the exhibits will not tie row-for-row to a previous
+dislocation run. It makes them tie to the classification analysis instead, which is the
+point.
+
+Three differences, not one:
+
+- **Interaction keys.** `c_variables` groups by `dri_type_cd_x_rat_km_work_nb` and three
+  siblings. Nothing in the original builds those — it inherited them from pyRate's
+  `keep_banding=True` output, so the exhibit was cut on the CHART's bands, not ours.
+  `ClassificationPrep` builds them.
+- **Credit score.** `clt_p_holder_credit_score_no` is in `c_variables` but the original's
+  banding never touches it. `ClassificationPrep` bands it (`1-499` … `850+`).
+- **Company codes.** The original defines `map_company()` and never calls it, so its
+  exhibits carry raw `snic`/`prim` while `01`/`02` carry `SN`/`PIC`/`TDHA`.
+  `MAP_COMPANY_CODES = True` applies the mapping to all four frames *before* any join, so
+  the `pol_uwcompany_cd` join key stays consistent. Set it `False` for the old labels.
+
+`DROP_OCCASIONAL_PRINCIPAL` is **off** by default. `01`/`02` drop those rows; dropping
+them here changes the dislocation denominators, which is a bigger change than
+re-bucketing. Turn it on only if the exhibit has to tie row-for-row to classification.
+
+If `ClassificationPrep` doesn't produce every name in `c_variables`, 05b says which ones
+are missing rather than failing inside the group-by.
+
+### One FSA selection
+
+`FSA_COL` widget, `veh_fsa_tx` (vehicle garaging) or `pol_fsa_tx` (policy mailing),
+normalised to `fsa_tx` exactly as `01`/`02` do it: upper-case, trimmed, nulls and blanks
+to `UNKNOWN` so the group-by keeps those rows. `c_variables` names `fsa_tx`, not the raw
+column. 05b prints row count, distinct FSA cells and the UNKNOWN count for each exhibit.
+
+If `veh_fsa_tx` isn't on the scored table, 05b names the problem and points at
+`ap_trx_data_extract_helper.csv` — the TRX pipeline only selects the columns listed there.
+
 Everything else is the original logic, with the current/proposed duplication collapsed:
 the original repeats the endorsement-split, earning and 8-coverage premium blocks two to
 three times each.
@@ -127,13 +165,16 @@ fixtures — 22 checks. It is not Spark and does not replace a cluster run; see
 python tests/test_dislocation_equivalence.py
 ```
 
-Checks `05a`/`05b` against the original `dislocation` for every part that does not need
-Spark: the rate-change splits and labels (at four bin settings), the 21 vehicle price
-bands, and the aggregate output column names in order for all three exhibits — each
-compared against the literals scraped out of the original file. It also enforces the
-split itself: 05a makes exactly one scoring call, 05b makes none, and the table names
-05a writes are the ones 05b reads, with `chart_suffix` identical in both. It does **not**
-execute the joins, window sums, `split_endorsements`, or the scoring.
+Three groups of checks. **Unchanged:** rate-change splits and labels (at four bin
+settings) and the aggregate output column names in order for all three exhibits, compared
+against the literals scraped out of the original file. **Deliberately changed:** that 05b
+delegates bucketing to `ClassificationPrep` and defines no bander of its own, that
+`c_variables` names what `ClassificationPrep` builds, and that the company map precedes
+the joins. **Structural:** 05a makes exactly one scoring call, 05b makes none, and the
+table names 05a writes are the ones 05b reads with `chart_suffix` identical in both.
+
+It does **not** execute the joins, window sums, `split_endorsements`, `ClassificationPrep`
+itself, or the scoring.
 
 ## Audit
 

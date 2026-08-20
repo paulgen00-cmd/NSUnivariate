@@ -15,18 +15,25 @@
 #     TRX_by_Driver_<CUR>-<PRP>
 #     Inf_by_Vehicle_<CUR>-<PRP>
 #
-# Same grouping, same aggregates, same column names as the original
-# `dislocation` notebook. tests/test_dislocation_equivalence.py checks the
-# generated column lists against the literals in that file.
+# Same aggregates and same output column names as the original `dislocation`
+# notebook. The CELL BOUNDARIES DIFFER: bucketing comes from ClassificationPrep
+# -- the same function the classification run uses -- instead of the banding the
+# original hand-rolls, and the FSA is selected via the FSA_COL widget. See the
+# Dislocation section of the README for exactly what that changes.
 # ============================================================================
 
 # ============================================================================
 # CELL 1 - paste alone
 # ============================================================================
+%run /Workspace/Shared/t_ap_ppa_pricing/Functions/AP_PPA_Classification
+
+# ============================================================================
+# CELL 2 - paste alone
+# ============================================================================
 %run /Workspace/Shared/t_ap_ppa_pricing/Functions/Utils
 
 # ============================================================================
-# CELL 2 - everything below is one cell
+# CELL 3 - everything below is one cell
 # ============================================================================
 from functools import reduce
 from operator import add
@@ -42,6 +49,7 @@ _DEFAULTS = {
     "trx_as_of_date_suffix": "202410",
     "inf_as_of_date":        "2026-03-27",
     "schema":                "u_wuhanz5",
+    "FSA_COL":               "veh_fsa_tx",   # or pol_fsa_tx
 }
 for _n, _d in _DEFAULTS.items():
     dbutils.widgets.text(_n, _d)
@@ -62,6 +70,8 @@ upper_bound =  0.15
 bin_step    =  0.05
 
 # --- variables the summaries are cut by ------------------------------------
+# The four dri_type_cd_x_* / dri_yrs_licensed_au_nb_x_* names are the interaction
+# keys ClassificationPrep builds. `fsa_tx` is the normalised FSA below.
 c_variables = ["dri_type_cd_x_rat_km_work_nb",
                "dri_type_cd_x_rat_km_business_nb",
                "dri_type_cd_x_rat_km_annual_nb",
@@ -72,12 +82,26 @@ c_variables = ["dri_type_cd_x_rat_km_work_nb",
                "veh_rg_dc_no",
                "veh_rg_col_no",
                "veh_rg_cmp_no",
-               "veh_fsa_tx"]
+               "fsa_tx"]
+
+FSA_COL = W("FSA_COL")   # veh_fsa_tx (vehicle garaging) or pol_fsa_tx (policy mailing)
 
 RUN_ADIDO = True    # False = build and display everything, export nothing
 
+# Match the classification notebooks (01/02): snic -> SN, prim -> PIC, else TDHA.
+# The original dislocation notebook defines map_company() but never calls it, so
+# its exhibits are cut by the raw codes and do not line up with the
+# classification run. Applied to all four frames before any join, so the
+# pol_uwcompany_cd join key stays consistent on both sides.
+MAP_COMPANY_CODES = True
+
+# 01/02 also drop OccasionalPrincipal rows. Left OFF here: dropping rows changes
+# the dislocation denominators, which is a bigger change than re-bucketing.
+# Turn it on only if the exhibit is meant to tie row-for-row to classification.
+DROP_OCCASIONAL_PRINCIPAL = False
+
 # ============================================================================
-# CELL 3 - resolve and validate the four input tables
+# CELL 4 - resolve and validate the four input tables
 # ============================================================================
 def chart_suffix(chart_name):
     """Must match 05a exactly, or the table names will not line up."""
@@ -108,6 +132,18 @@ if _missing:
 
 DF = {k: spark.table(t) for k, t in TABLES.items()}
 
+# Company mapping goes here, before anything joins on pol_uwcompany_cd, so both
+# sides of every join carry the same code. Doing it later would break the join.
+if MAP_COMPANY_CODES:
+    def _map_company(d):
+        return d.withColumn(
+            "pol_uwcompany_cd",
+            F.when(F.col("pol_uwcompany_cd") == F.lit("snic"), F.lit("SN"))
+             .when(F.col("pol_uwcompany_cd") == F.lit("prim"), F.lit("PIC"))
+             .otherwise(F.lit("TDHA")))
+    DF = {k: _map_company(d) for k, d in DF.items()}
+    print("pol_uwcompany_cd mapped to SN / PIC / TDHA (matches 01/02)")
+
 # Both sides of a dataset come from the same prep table, so their row counts
 # must agree. If they do not, the two 05a runs saw different source data and
 # the join below would silently drop or duplicate rows.
@@ -122,7 +158,7 @@ for ds in ("trx", "inf"):
             f"against the same as-of date before summarising.")
 
 # ============================================================================
-# CELL 4 - shared helpers
+# CELL 5 - shared helpers
 # ============================================================================
 CLAIM_COLS = ["clm_chap_bi_cap500k_am", "clm_chap_pd_am", "clm_chap_dc_am",
               "clm_chap_ab_cap500k_am", "clm_chap_um_am", "clm_chap_col_am",
@@ -135,12 +171,6 @@ EARN_MAP = [("BI", "BI"), ("PD", "PD"), ("DC", "DC"), ("AB", "AB"), ("UA", "UA")
 
 def nz(col):
     return F.coalesce(col, F.lit(0.0))
-
-def nz_num(col, default):
-    return F.coalesce(col, F.lit(default))
-
-def nz_str(col, default="N"):
-    return F.coalesce(col, F.lit(default))
 
 def coalesce_any(df, names):
     existing = [F.col(c) for c in names if c in df.columns]
@@ -180,74 +210,53 @@ def add_rate_change_bucket(df, col_name="Rate_Change_Pc", out_col="Rate_Change_L
                                                  F.col(bucket_col).cast("int") + F.lit(1))))
             .drop(bucket_col))
 
-# --- rating-variable banding ----------------------------------------------
-def km_annual_group(col):
-    return (F.when(col <= 5000, F.lit("0-5000"))
-             .when((col > 5000) & (col <= 10000), F.lit("5001-10000"))
-             .when((col > 10000) & (col <= 15000), F.lit("10001-15000"))
-             .when((col > 15000) & (col <= 20000), F.lit("15001-20000"))
-             .when(col > 20000, F.lit("20001+"))
-             .otherwise(F.lit(None)))
+# --- bucketing: ClassificationPrep, the same one the classification run uses -
+# The original dislocation notebook hand-rolls its own km / price / veh-age /
+# cap banding. ClassificationPrep does all of that AND two things the hand-rolled
+# version does not:
+#   * builds the dri_type_cd_x_* and dri_yrs_licensed_au_nb_x_* interaction keys
+#     that c_variables groups by (the original relied on pyRate's keep_banding
+#     output for these, so the exhibit was cut on pyRate's bands, not ours)
+#   * bands clt_p_holder_credit_score_no (1-499 ... 850+), also in c_variables
+# Using it here makes the dislocation exhibit line up with the classification
+# analysis. See README -- this DOES change the cell boundaries versus the
+# original dislocation output.
+def classification_prep(d, label):
+    """01/02's chain, minus the company map (already applied in CELL 4)."""
+    if DROP_OCCASIONAL_PRINCIPAL:
+        d = d.filter(F.col("dri_type_cd") != F.lit("OccasionalPrincipal"))
 
-def km_work_group(col):
-    return (F.when(col == 0, F.lit("0"))
-             .when((col > 0) & (col <= 5),   F.lit("1-5"))
-             .when((col > 5) & (col <= 15),  F.lit("6-15"))
-             .when((col > 15) & (col <= 30), F.lit("16-30"))
-             .when(col > 30, F.lit("31+"))
-             .otherwise(F.lit(None)))
+    d = ClassificationPrep(d)
 
-def km_business_group(col):
-    return F.when(col == 0, F.lit("0")).when(col > 0, F.lit("1+")).otherwise(F.lit(None))
+    # Raw FSA: upper/trim, nulls and blanks to UNKNOWN so the group-by keeps
+    # those rows instead of silently dropping them. Same as 01/02.
+    if FSA_COL not in d.columns:
+        raise ValueError(
+            f"{label}: {FSA_COL!r} is not on the scored table. The TRX pipeline "
+            f"selects only the columns in ap_trx_data_extract_helper.csv -- add "
+            f"{FSA_COL} there and re-run 05a. Available fsa columns: "
+            f"{[c for c in d.columns if 'fsa' in c.lower()]}")
+    _fsa = F.upper(F.trim(F.col(FSA_COL)))
+    d = d.withColumn("fsa_tx",
+                     F.when(_fsa.isNull() | (_fsa == F.lit("")), F.lit("UNKNOWN"))
+                      .otherwise(_fsa))
 
-def cap_gt8_as_str(col):
-    return F.when(col > 8, F.lit(">8")).otherwise(col.cast("string"))
+    _chk = d.agg(F.count(F.lit(1)).alias("rows"),
+                 F.countDistinct(F.col("fsa_tx")).alias("cells"),
+                 F.sum(F.when(F.col("fsa_tx") == "UNKNOWN", 1).otherwise(0)).alias("unknown")
+                 ).collect()[0]
+    print(f"{label}: rows={_chk['rows']:,}  FSA cells={_chk['cells']:,}  "
+          f"UNKNOWN={_chk['unknown']:,}")
 
-def cap_onp_as_str(col):
-    return F.when(col > 4, F.lit(">4")).otherwise(col.cast("string"))
-
-def veh_age_bucket(col):
-    return F.when(col > 10, F.lit("10+")).otherwise(col.cast("string"))
-
-# 5k bands from 10000 to 99999, then the three wide bands. Same 21 labels as
-# the hand-written when() chain in the original.
-_PRICE_BANDS = ([(10000 + 5000 * i, 15000 + 5000 * i,
-                  f"{10000 + 5000 * i}-{14999 + 5000 * i}") for i in range(18)]
-                + [(100000, 125000, "100000-124999"),
-                   (125000, 150000, "125000-149999"),
-                   (150000, 200000, "150000-199999")])
-
-def price_band(col):
-    out = F.when((col > 0) & (col < 10000), F.lit("0-9999"))
-    for lo, hi, lbl in _PRICE_BANDS:
-        out = out.when((col >= lo) & (col < hi), F.lit(lbl))
-    return out.when(col >= 200000, F.lit("200000+")).otherwise(F.lit("Not Available"))
-
-def band_common(d):
-    """The banding block the original repeats in the TRX-driver and the
-    inforce-vehicle paths."""
-    return (d
-            .withColumn("rat_km_annual_nb",     km_annual_group(F.col("rat_km_annual_nb")))
-            .withColumn("rat_km_work_nb",       km_work_group(F.col("rat_km_work_nb")))
-            .withColumn("rat_km_business_nb",   km_business_group(F.col("rat_km_business_nb")))
-            .withColumn("number_veh_in_family", cap_gt8_as_str(F.col("number_veh_in_family")))
-            .withColumn("number_au_mh",         cap_gt8_as_str(F.col("number_au_mh")))
-            .withColumn("veh_dri_onp_nb",       cap_onp_as_str(F.col("veh_dri_onp_nb")))
-            .withColumn("exp_col_af_10yrs_nb",     nz_num(F.col("exp_col_af_10yrs_nb"), 0))
-            .withColumn("exp_col_af_10yrs_avg_nb", nz_num(F.col("exp_col_af_10yrs_avg_nb"), 99))
-            .withColumn("exp_minor_03yrs_nb",      nz_num(F.col("exp_minor_03yrs_nb"), 0))
-            .withColumn("exp_minor_03yrs_avg_nb",  nz_num(F.col("exp_minor_03yrs_avg_nb"), 99))
-            .withColumn("exp_major_03yrs_nb",      nz_num(F.col("exp_major_03yrs_nb"), 0))
-            .withColumn("exp_criminal_03yrs_nb",   nz_num(F.col("exp_criminal_03yrs_nb"), 0))
-            .withColumn("exp_susp_minus_03yrs_nb", nz_num(F.col("exp_susp_minus_03yrs_nb"), 0))
-            .withColumn("exp_susp_plus_03yrs_nb",  nz_num(F.col("exp_susp_plus_03yrs_nb"), 0))
-            .withColumn("cov_cmp_ded_am", nz_str(F.col("cov_cmp_ded_am"), "N"))
-            .withColumn("cov_col_ded_am", nz_str(F.col("cov_col_ded_am"), "N"))
-            .withColumn("veh_age_nb",        veh_age_bucket(F.col("veh_age_nb")))
-            .withColumn("veh_vicc_price_am", price_band(F.col("veh_vicc_price_am"))))
+    missing = [c for c in c_variables if c not in d.columns]
+    if missing:
+        raise ValueError(
+            f"{label}: ClassificationPrep did not produce {missing}. "
+            f"c_variables must name columns it builds.")
+    return d
 
 # ============================================================================
-# CELL 5 - TRX dislocation, by vehicle and by driver
+# CELL 6 - TRX dislocation, by vehicle and by driver
 # ============================================================================
 df_final_current  = DF[("trx", "current")]
 df_final_proposed = DF[("trx", "proposed")]
@@ -312,8 +321,9 @@ df_trx_veh_fin.display()
 df_trx_dri = df_final_current.join(
     df_trx_veh_binned.select(*veh_group, "Rate_Change_Level"), on=veh_group, how="left")
 
-df_trx_dri_prop = band_common(
-    add_earned(add_earned(join_sides(df_trx_dri), "current"), "proposed"))
+df_trx_dri_prop = classification_prep(
+    add_earned(add_earned(join_sides(df_trx_dri), "current"), "proposed"),
+    "TRX by driver")
 
 cols_to_keep_dri = ["Rate_Change_Level", "pol_acc_yr_dt", "pol_uwcompany_cd"] \
                    + c_variables + ["pol_business_cd"]
@@ -334,7 +344,7 @@ df_trx_dri_fin2 = df_trx_dri_prop.groupBy(*cols_to_keep_dri).agg(
 df_trx_dri_fin2.display()
 
 # ============================================================================
-# CELL 6 - inforce dislocation by vehicle
+# CELL 7 - inforce dislocation by vehicle
 # ============================================================================
 inf_cur  = DF[("inf", "current")]
 inf_prop = DF[("inf", "proposed")]
@@ -388,7 +398,8 @@ inf_veh = inf_veh.withColumn(
 inf_veh_principal = (inf_veh.filter(F.col("dri_type_cd") == F.lit("Principal"))
                             .dropDuplicates(veh_keys))
 
-inf_veh_binned = (band_common(add_rate_change_bucket(inf_veh_principal))
+inf_veh_binned = (classification_prep(add_rate_change_bucket(inf_veh_principal),
+                                      "INF by vehicle")
                   .withColumn("Mandatory_Only",
                               F.when(nz(F.col("Prm_Trm_Veh_AP_COL_Uncap_Am"))
                                      + nz(F.col("Prm_Trm_Veh_AP_SP_COMP_Uncap_Am")) == 0,
@@ -410,7 +421,7 @@ inf_final = inf_veh_binned.groupBy(*cols_to_keep_inf).agg(
 inf_final.display()
 
 # ============================================================================
-# CELL 7 - export. ADIDO 2569, parquet, the same three files as the original.
+# CELL 8 - export. ADIDO 2569, parquet, the same three files as the original.
 # ============================================================================
 _OUT_FOLDER = f"t_ap_ppa_pricing/data/{province.lower()}/dislocation/"
 _EXPORTS = [(df_trx_veh_fin,  f"TRX_by_Vehicle_{CUR}-{PRP}"),

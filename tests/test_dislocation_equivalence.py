@@ -1,16 +1,26 @@
-"""Prove the refactor in databricks/05_dislocation.py is output-equivalent to the
-original `dislocation` notebook, for every part that can be checked without Spark.
+"""Check databricks/05a + 05b against the original `dislocation` notebook, for
+every part that can be verified without Spark.
 
     python tests/test_dislocation_equivalence.py
 
-The original replaces several hand-written literal chains with generated lists
-(price bands, bucket labels, per-coverage aggregate aliases). Those generators
-are exactly where a refactor silently changes a filing number, so each one is
-compared against the literals scraped out of the original file.
+Three groups of checks:
 
-What this does NOT prove: anything that needs a Spark session or pyRate -- the
-joins, the window sums, split_endorsements, the scoring itself. Those are
-unchanged code moved into functions, but they are not executed here.
+1. UNCHANGED -- the measures. Rate-change splits and labels, and the aggregate
+   output column names in order for all three exhibits, are compared against
+   the literals scraped out of the original file. A refactor that reorders an
+   .agg() silently reshuffles a filing exhibit, so these are pinned exactly.
+
+2. DELIBERATELY CHANGED -- the bucketing. 05b calls the shared
+   ClassificationPrep instead of the original's hand-rolled km / price /
+   veh-age / cap chain, so the dislocation exhibit is cut the same way as the
+   classification run. These checks pin the swap rather than the old values.
+
+3. STRUCTURAL -- the 05a/05b split. 05a makes exactly one scoring call, 05b
+   makes none, and the table names 05a writes are the ones 05b reads.
+
+What this does NOT prove: anything needing a Spark session or pyRate -- the
+joins, the window sums, split_endorsements, ClassificationPrep's own output, or
+the scoring. Run 05b with RUN_ADIDO = False and compare before exporting.
 """
 import re
 import sys
@@ -64,7 +74,7 @@ def original_labels(lower_bound, upper_bound, bin_step):
 
 
 def refactor_labels(lower_bound, upper_bound, bin_step):
-    """Verbatim from databricks/05_dislocation.py CELL 13."""
+    """Verbatim from databricks/05b_dislocation_summary.py."""
     n_bins = int(round((upper_bound - lower_bound) / bin_step)) + 1
     seq_vals = [lower_bound + i * bin_step for i in range(n_bins)]
     splits = [-float("inf")] + seq_vals + [float("inf")]
@@ -92,25 +102,52 @@ for lo, hi, step in [(-0.05, 0.15, 0.05), (-0.10, 0.25, 0.025), (0.0, 0.10, 0.05
 
 
 # ---------------------------------------------------------------------------
-# 2. Vehicle price bands
+# 2. Bucketing now comes from ClassificationPrep, not hand-rolled banding
 # ---------------------------------------------------------------------------
-# Scrape the original's hand-written when() chain: the (lo, hi, label) triples.
+# 05b deliberately drops the original's own km / price / veh-age / cap chain and
+# calls the shared ClassificationPrep, so the dislocation exhibit is cut the same
+# way as the classification run. These checks pin that swap: if a hand-rolled
+# bander comes back, the two analyses silently diverge again.
+print("bucketing delegated to ClassificationPrep")
+check("05b runs AP_PPA_Classification",
+      "Functions/AP_PPA_Classification" in REFACTOR, True)
+check("05b calls ClassificationPrep", "ClassificationPrep(d)" in REFACTOR, True)
+for bander in ["def price_band", "def km_annual_group", "def km_work_group",
+               "def veh_age_bucket", "def cap_gt8_as_str", "def band_common"]:
+    check(f"05b no longer defines {bander[4:]}", bander in REFACTOR, False)
+
+# The original's own price_band is still the reference for what ClassificationPrep
+# is expected to produce -- the guide documents the same $5k bands. Confirm the
+# original really did carry 21 interior bands, so the README claim is accurate.
 _price_src = ORIGINAL[ORIGINAL.index("def price_band"):]
 _price_src = _price_src[:_price_src.index("# 11)")]
 original_price = re.findall(
     r'col >= (\d+)\) & \(col < (\d+)\),\s*F\.lit\("([^"]+)"\)', _price_src)
-original_price = [(int(a), int(b), c) for a, b, c in original_price]
+check("original price band count", len(original_price), 21)
 
-refactor_price = ([(10000 + 5000 * i, 15000 + 5000 * i,
-                    f"{10000 + 5000 * i}-{14999 + 5000 * i}") for i in range(18)]
-                  + [(100000, 125000, "100000-124999"),
-                     (125000, 150000, "125000-149999"),
-                     (150000, 200000, "150000-199999")])
+# c_variables must name what ClassificationPrep builds. The four interaction keys
+# and the normalised FSA are the ones that would fail at group-by time.
+print("c_variables")
+_cv = REFACTOR[REFACTOR.index("c_variables = ["):]
+_cv = _cv[:_cv.index("]")]
+for v in ["dri_type_cd_x_rat_km_work_nb", "dri_type_cd_x_rat_km_business_nb",
+          "dri_type_cd_x_rat_km_annual_nb", "dri_yrs_licensed_au_nb_x_dri_gender_cd",
+          "clt_p_holder_credit_score_no", "fsa_tx"]:
+    check(f"c_variables has {v}", f'"{v}"' in _cv, True)
+check("c_variables no longer names veh_fsa_tx directly", '"veh_fsa_tx"' in _cv, False)
+check("05b guards c_variables against ClassificationPrep",
+      "did not produce" in REFACTOR, True)
 
-print("price bands")
-check("price band triples", refactor_price, original_price)
-check("price band count", len(refactor_price), 21)
+# FSA selection, matching 01/02.
+print("FSA selection")
+check("FSA_COL widget", '"FSA_COL"' in REFACTOR, True)
+check("FSA normalised to UNKNOWN", 'F.lit("UNKNOWN")' in REFACTOR, True)
 
+# Company mapping must happen before any join on pol_uwcompany_cd.
+print("company mapping order")
+_map_at = REFACTOR.index("_map_company")
+_join_at = REFACTOR.index("def join_sides")
+check("company map precedes the joins", _map_at < _join_at, True)
 
 # ---------------------------------------------------------------------------
 # 3. Aggregate output column names, in order
